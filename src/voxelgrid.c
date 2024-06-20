@@ -90,6 +90,7 @@
  */
 
 #include "gp_types.h"
+#include "gplocale.h"
 #include "alloc.h"
 #include "axis.h"
 #include "command.h"
@@ -100,20 +101,20 @@
 #include "graph3d.h"
 #include "parse.h"
 #include "util.h"
-#include "variable.h"
 #include "voxelgrid.h"
 
 #ifdef VOXEL_GRID_SUPPORT
 
 static vgrid *current_vgrid = NULL;			/* active voxel grid */
 static struct udvt_entry *udv_VoxelDistance = NULL;	/* reserved user variable */
+static struct udvt_entry *udv_GridDistance = NULL;	/* reserved user variable */
 struct isosurface_opt isosurface_options;
 
 /* Internal prototypes */
-static void vfill( t_voxel *grid );
+static void vfill( t_voxel *grid, TBOOLEAN gridcoordinates );
 static void modify_voxels( t_voxel *grid, double x, double y, double z,
-			    double radius, struct at_type *function );
-static void vgrid_stats( vgrid *vgrid );
+			    double radius, struct at_type *function,
+			    TBOOLEAN gridcoordinates );
 
 /* Purely local bookkeeping */
 static int nvoxels_modified;
@@ -125,13 +126,16 @@ static struct at_type *density_function = NULL;
 void
 init_voxelsupport()
 {
-    /* Make sure there is a user variable that can be used as a parameter
+    /* Make sure there are user variables that can be used as a parameter
      * to the function in the 5th spec of "vfill".
      * Scripts can test if (exists("VoxelDistance")) to check for voxel support.
      */
     udv_VoxelDistance = add_udv_by_name("VoxelDistance");
     udv_VoxelDistance->udv_value.type = CMPLX;
     Gcomplex(&udv_VoxelDistance->udv_value, 0.0, 0.0);
+    udv_GridDistance = add_udv_by_name("GridDistance");
+    udv_GridDistance->udv_value.type = CMPLX;
+    Gcomplex(&udv_GridDistance->udv_value, 0.0, 0.0);
 
     /* default state of other voxel-related structures */
     isosurface_options.inside_offset = 1;	/* inside color = outside + 1 */
@@ -315,8 +319,9 @@ show_vgrid()
  * run through the whole grid
  * accumulate min/max, mean, and standard deviation of non-zero voxels
  * TODO: median
+ * TODO: only count voxels in range on x y and z
  */
-static void
+void
 vgrid_stats(vgrid *vgrid)
 {
     double min = VERYLARGE;
@@ -356,6 +361,7 @@ vgrid_stats(vgrid *vgrid)
     vgrid->min_value = min;
     vgrid->max_value = max;
     vgrid->nzero = nzero;
+    vgrid->sum = sum;
     if (num < 2) {
 	vgrid->mean_value = vgrid->stddev = not_a_number();
     } else {
@@ -371,9 +377,9 @@ vgrid_stats(vgrid *vgrid)
 }
 
 udvt_entry *
-get_vgrid_by_name(char *name)
+get_vgrid_by_name(const char *name)
 {
-    struct udvt_entry *vgrid = get_udv_by_name(name);
+    struct udvt_entry *vgrid = get_udv_by_name((char *)name);
 
     if (!vgrid || vgrid->udv_value.type != VOXELGRID)
 	return NULL;
@@ -430,6 +436,8 @@ unset_vgrid()
 
     if (END_OF_COMMAND || !equals(c_token,"$"))
 	int_error(c_token, "syntax: unset vgrid $<gridname>");
+    if (evaluate_inside_functionblock && inside_plot_command)
+	int_error(c_token, "unset vgrid not possible in this context");
 
     /* Look for a datablock with the requested name */
     name = parse_datablock_name();
@@ -593,18 +601,25 @@ f_voxel(union argument *arg)
  *
  * vfill shares the routines df_open df_readline ... with the plot and splot
  * commands.
+ *
+ * "vgfill" is exactly the same except that it uses grid coordinates rather
+ * than user coordinates.  If the user coordinate system is isotropic
+ * (e.g. "set view equal xyz") then vfill and vgfill are identical except
+ * possibly for a linear scale factor.
  */
 void
 vfill_command()
 {
+    TBOOLEAN gridcoordinates = equals(c_token++, "vgfill");
     if (!current_vgrid)
 	int_error(c_token, "No current voxel grid");
-    c_token++;
-    vfill(current_vgrid->vdata);
+    inside_plot_command = TRUE;	/* Same interlock as plot/splot/stats */
+    vfill(current_vgrid->vdata, gridcoordinates);
+    inside_plot_command = FALSE;
 }
 
 static void
-vfill(t_voxel *grid)
+vfill(t_voxel *grid, TBOOLEAN gridcoordinates)
 {
     int plot_num = 0;
     struct curve_points dummy_plot;
@@ -667,8 +682,9 @@ vfill(t_voxel *grid)
 	    use_spec[4].column = 0;
 	}
 
-	/* Initialize user variable VoxelDistance used by density_function() */
+	/* Initialize user variables used by density_function() */
 	Gcomplex(&udv_VoxelDistance->udv_value, 0.0, 0.0);
+	Gcomplex(&udv_GridDistance->udv_value, 0.0, 0.0);
 
 	/* Store a pointer to the named variable used for sampling */
 	/* Save prior value of sample variables so we can restore them later */
@@ -744,7 +760,8 @@ vfill(t_voxel *grid)
 		 * vfill() has a fixed interpretation of v[] and will use it to
 		 * modify the current voxel grid.
 		 */
-		modify_voxels( grid, v[0], v[1], v[2], v[3], density_function );
+		modify_voxels( grid, v[0], v[1], v[2], v[3], density_function,
+				gridcoordinates );
 
 	    } /* End of loop over input data points */
 
@@ -800,17 +817,26 @@ vfill(t_voxel *grid)
 }
 
 /* This is called by vfill for every data point.
- * It modifies all voxels within radius of the point coordinates.
+ * It modifies all voxels within a specified radius of the point coordinates.
+ * There are two modes of operation
+ *	TRUE (vgfill)	- radius and distance are calculated in grid coordinates
+ *	FALSE (vfill)	- radius and distance are calculated in user coordinates
+ * Calculation in user coordinates becomes increasingly problematic as the
+ * nominal grid spacing along x, y, and z diverges due to unequal
+ * vxrange, vyrange, vzrange.
  */
 static void
 modify_voxels( t_voxel *grid, double x, double y, double z,
-			double radius, struct at_type *density_function )
+			double radius, struct at_type *density_function,
+			TBOOLEAN gridcoordinates )
 {
     struct value a;
     int ix, iy, iz;
     int ivx, ivy, ivz;
     int nvx, nvy, nvz;
-    double vx, vy, vz, distance;
+    TBOOLEAN save_fpe_trap;
+    double vx, vy, vz, gvx, gvy, gvz;
+    double distance, grid_dist;
     t_voxel *voxel;
     int N;
 
@@ -821,21 +847,48 @@ modify_voxels( t_voxel *grid, double x, double y, double z,
 
     N = current_vgrid->size;
 
+    /* gvx, gvy, gvz are the fractional indicies of this point */
     /* ivx, ivy, ivz are the indices of the nearest grid point */
-    ivx = ceil( (x - current_vgrid->vxmin) / current_vgrid->vxdelta );
-    ivy = ceil( (y - current_vgrid->vymin) / current_vgrid->vydelta );
-    ivz = ceil( (z - current_vgrid->vzmin) / current_vgrid->vzdelta );
+    gvx = (x - current_vgrid->vxmin) / current_vgrid->vxdelta;
+    gvy = (y - current_vgrid->vymin) / current_vgrid->vydelta;
+    gvz = (z - current_vgrid->vzmin) / current_vgrid->vzdelta;
+    ivx = ceil(gvx);
+    ivy = ceil(gvy);
+    ivz = ceil(gvz);
 
     /* nvx, nvy, nvz are the number of grid points within radius */
-    nvx = floor( radius / current_vgrid->vxdelta );
-    nvy = floor( radius / current_vgrid->vydelta );
-    nvz = floor( radius / current_vgrid->vzdelta );
-
-    /* Only print once */
-    if (nvoxels_modified == 0)
-	fprintf(stderr,
+    if (gridcoordinates) {
+	/* Grid coordinates are isotropic */
+	nvx = nvy = nvz = floor(radius);
+	if (nvoxels_modified == 0)
+	    fprintf(stderr, "\t%d x %d x %d voxel cube using grid coordinates\n",
+		    1+2*nvx, 1+2*nvy, 1+2*nvz);
+    } else {
+	/* User coordinates may be anisotropic */
+	nvx = floor( radius / current_vgrid->vxdelta );
+	nvy = floor( radius / current_vgrid->vydelta );
+	nvz = floor( radius / current_vgrid->vzdelta );
+	/* Only print once */
+	if (nvoxels_modified == 0) {
+	    double anisotropy = (double) (GPMIN(nvx, GPMIN(nvy, nvz)))
+	                      / (double) (GPMAX(nvx, GPMAX(nvy, nvz)));
+	    fprintf(stderr,
 		"\tradius %g gives a brick of %d voxels on x, %d voxels on y, %d voxels on z\n",
 		radius, 1+2*nvx, 1+2*nvy, 1+2*nvz);
+	    if (anisotropy < 0.4)
+		fprintf(stderr,
+		    "Warning:\n"
+		    "\tvoxel grid spacing on x, y, and z is very anisotropic.\n"
+		    "\tConsider using vgfill rather than vfill\n");
+	}
+    }
+
+    /* This can be a HUGE iteration, in which case resetting the
+     * FPE trap handler on every voxel evaluateion can be a
+     * significant performance bottleneck (why??).
+     */
+    save_fpe_trap = df_nofpe_trap;
+    df_nofpe_trap = TRUE;
 
     /* The iteration covers a cube rather than a sphere */
     evaluate_inside_using = TRUE;
@@ -860,14 +913,23 @@ modify_voxels( t_voxel *grid, double x, double y, double z,
 		vy = current_vgrid->vymin + iy * current_vgrid->vydelta;
 		vz = current_vgrid->vzmin + iz * current_vgrid->vzdelta;
 		distance = sqrt( (vx-x)*(vx-x) + (vy-y)*(vy-y) + (vz-z)*(vz-z) );
+		grid_dist = sqrt( (gvx-ix)*(gvx-ix) + (gvy-iy)*(gvy-iy) + (gvz-iz)*(gvz-iz) );
 
 		/* Limit the summation to a sphere rather than a cube */
 		/* but always include the voxel nearest the target    */
-		if (distance > radius && (ix != ivx || iy != ivy || iz != ivz))
-		    continue;
+		if (gridcoordinates) {
+		    /* Grid coordinates */
+		    if (grid_dist > radius && (ix != ivx || iy != ivy || iz != ivz))
+			continue;
+		} else {
+		    /* User coordinates */
+		    if (distance > radius && (ix != ivx || iy != ivy || iz != ivz))
+			continue;
+		}
 
 		/* Store in user variable VoxelDistance for use by density_function */
 		udv_VoxelDistance->udv_value.v.cmplx_val.real = distance;
+		udv_GridDistance->udv_value.v.cmplx_val.real = grid_dist;
 
 		evaluate_at(density_function, &a);
 		*voxel += real(&a);
@@ -877,6 +939,8 @@ modify_voxels( t_voxel *grid, double x, double y, double z,
 	    }
 	}
     }
+
+    df_nofpe_trap = save_fpe_trap;
     evaluate_inside_using = FALSE;
 
     return;

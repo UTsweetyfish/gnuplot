@@ -34,11 +34,14 @@
 
 #include "syscfg.h"
 #include "alloc.h"
+#include "amos_airy.h"	/* Airy functions from AMOS */
+#include "complexfun.h"
 #include "datafile.h"
 #include "datablock.h"
 #include "external.h"	/* for f_calle */
 #include "internal.h"
 #include "libcerf.h"
+#include "misc.h"	/* for called_from() */
 #include "specfun.h"
 #include "standard.h"
 #include "util.h"
@@ -122,10 +125,11 @@ const struct ft_entry ft[] =
     {"concatenate",  f_concatenate},	/* for string variables only */
     {"eqs",  f_eqs},			/* for string variables only */
     {"nes",  f_nes},			/* for string variables only */
-    {"[]",  f_range},			/* for string variables only */
+    {"[]",  f_range},			/* substring or array slice */
     {"[]",  f_index},			/* for array variables only */
     {"||",  f_cardinality},		/* for array variables only */
     {"assign", f_assign},		/* assignment operator '=' */
+    {"eval", f_eval},			/* function block */
     {"jump",  f_jump},
     {"jumpz",  f_jumpz},
     {"jumpnz",  f_jumpnz},
@@ -151,6 +155,7 @@ const struct ft_entry ft[] =
     {"real",  f_real},
     {"imag",  f_imag},
     {"arg",  f_arg},
+    {"conj",  f_conjg},
     {"conjg",  f_conjg},
     {"sin",  f_sin},
     {"cos",  f_cos},
@@ -166,14 +171,17 @@ const struct ft_entry ft[] =
     {"EllipticE",  f_ellip_second},
     {"EllipticPi", f_ellip_third},
     {"int",  f_int},
+    {"round",  f_round},
     {"abs",  f_abs},
     {"sgn",  f_sgn},
     {"sqrt",  f_sqrt},
+    {"cbrt",  f_cbrt},
     {"exp",  f_exp},
     {"log10",  f_log10},
     {"log",  f_log},
     {"besi0",  f_besi0},
     {"besi1",  f_besi1},
+    {"besin",  f_besin},
     {"besj0",  f_besj0},
     {"besj1",  f_besj1},
     {"besjn",  f_besjn},
@@ -186,29 +194,59 @@ const struct ft_entry ft[] =
     {"lgamma",  f_lgamma},
     {"ibeta",  f_ibeta},
     {"voigt",  f_voigt},
-    {"igamma",  f_igamma},
     {"rand",  f_rand},
     {"floor",  f_floor},
     {"ceil",  f_ceil},
 
-    {"norm",  f_normal},	/* XXX-JG */
-    {"inverf",  f_inverse_erf},	/* XXX-JG */
-    {"invnorm",  f_inverse_normal},	/* XXX-JG */
+    {"norm",  f_normal},
+    {"inverf",  f_inverse_erf},
+    {"invnorm",  f_inverse_normal},
+    {"invigamma", f_inverse_igamma},
+    {"invibeta", f_inverse_ibeta},
     {"asinh",  f_asinh},
     {"acosh",  f_acosh},
     {"atanh",  f_atanh},
-    {"lambertw",  f_lambertw}, /* HBB, from G.Kuhnle 20001107 */
-    {"airy",  f_airy},         /* janert, 20090905 */
-    {"expint",  f_expint},     /* Jim Van Zandt, 20101010 */
-    {"besin",  f_besin},
+    {"lambertw",  f_lambertw},	/* HBB, from G.Kuhnle 20001107 */
+    {"airy",  f_airy},		/* cephes library version */
+#ifdef HAVE_AMOS
+    {"Ai", f_amos_Ai},		/* Amos version from libopenspecfun */
+    {"Bi", f_amos_Bi},		/* Amos version from libopenspecfun */
+    {"BesselI", f_amos_BesselI},/* Amos version from libopenspecfun */
+    {"BesselJ", f_amos_BesselJ},/* Amos version from libopenspecfun */
+    {"BesselK", f_amos_BesselK},/* Amos version from libopenspecfun */
+    {"BesselY", f_amos_BesselY},/* Amos version from libopenspecfun */
+    {"Hankel1", f_Hankel1},	/* Amos version from libopenspecfun */
+    {"Hankel2", f_Hankel2},	/* Amos version from libopenspecfun */
+#endif
+#ifdef HAVE_CEXINT
+    {"expint",  f_amos_cexint},	/* Amos algorithm 683 from libamos */
+#else
+    {"expint",  f_expint},	/* Jim Van Zandt, 20101010 */
+#endif
+
+#ifdef HAVE_COMPLEX_FUNCS
+    {"igamma", f_Igamma},	/* Complex igamma(a,z) */
+    {"LambertW", f_LambertW},	/* Complex W(z,k) */
+    {"lnGamma", f_lnGamma},	/* Complex lnGamma(z) */
+    {"Sign", f_Sign},		/* Complex sign function */
+    {"zeta", f_zeta},		/* Riemann zeta function */
+#else
+    {"igamma",  f_igamma},	/* Jos van der Woude 1992 */
+#endif
+    {"uigamma",  f_uigamma},	/* upper incomplete gamma */
 
 #ifdef HAVE_LIBCERF
     {"cerf", f_cerf},		/* complex error function */
     {"cdawson", f_cdawson},	/* complex Dawson's integral */
     {"erfi", f_erfi},		/* imaginary error function */
     {"VP", f_voigtp},		/* Voigt profile */
+    {"VP_fwhm", f_VP_fwhm},	/* Voigt profile full width at half maximum */
     {"faddeeva", f_faddeeva},	/* Faddeeva rescaled complex error function "w_of_z" */
+    {"FresnelC", f_FresnelC},	/* Fresnel integral cosine term calculated from cerf */
+    {"FresnelS", f_FresnelS},	/* Fresnel integral sine term calculated from cerf */
 #endif
+
+    {"SynchrotronF", f_SynchrotronF},	/* Synchrotron F */
 
     {"tm_sec",  f_tmsec},	/* time function */
     {"tm_min",  f_tmmin},	/* time function */
@@ -222,11 +260,13 @@ const struct ft_entry ft[] =
     {"weekdate_iso", f_weekdate_iso},
     {"weekdate_cdc", f_weekdate_cdc},
 
+    {"join",  f_join},		/* create string from array */
     {"sprintf",  f_sprintf},	/* for string variables only */
     {"gprintf",  f_gprintf},	/* for string variables only */
     {"strlen",  f_strlen},	/* for string variables only */
     {"strstrt",  f_strstrt},	/* for string variables only */
     {"substr",  f_range},	/* for string variables only */
+    {"split", f_split},		/* for string variables only */
     {"trim",  f_trim},		/* for string variables only */
     {"word",  f_word},		/* for string variables only */
     {"words", f_words},		/* implemented as word(s,-1) */
@@ -237,9 +277,11 @@ const struct ft_entry ft[] =
     {"exist", f_exists},	/* exists("foo") replaces defined(foo) */
     {"exists", f_exists},	/* exists("foo") replaces defined(foo) */
     {"value", f_value},		/* retrieve value of variable known by name */
+    {"index", f_lookup},	/* retrieve index of array entry with known value */
 
     {"hsv2rgb", f_hsv2rgb},	/* color conversion */
     {"palette", f_palette},	/* palette color lookup */
+    {"rgbcolor", f_rgbcolor},	/* 32bit ARGB color lookup by name or string */
 
 #ifdef VOXEL_GRID_SUPPORT
     {"voxel", f_voxel},		/* extract value of single voxel */
@@ -257,7 +299,7 @@ static JMP_BUF fpe_env;
 static RETSIGTYPE
 fpe(int an_int)
 {
-#if defined(MSDOS) && !defined(__EMX__) && !defined(DJGPP)
+#if defined(MSDOS) && !defined(DJGPP)
     /* thanks to lotto@wjh12.UUCP for telling us about this  */
     _fpreset();
 #endif
@@ -283,7 +325,7 @@ real(struct value *val)
 	return ((double) val->v.int_val);
     case CMPLX:
 	return (val->v.cmplx_val.real);
-    case STRING:    /* FIXME is this ever used? */
+    case STRING:
 	return (atof(val->v.string_val));
     case NOTDEFINED:
 	return not_a_number();
@@ -409,21 +451,45 @@ Gstring(struct value *a, char *s)
     return (a);
 }
 
-/* Common interface for freeing data structures attached to a struct value.
- * Each of the type-specific routines will ignore values of other types.
+/* The rationale for introducing this routine was that multiple call sites
+ * wanted to write a new value to a variable that might already have one.
+ * free_value() was intended to consider all possible previous value types
+ * and free attached memory for types that had any.
+ *
+ * Caveat:  When freeing values popped from the evaluation stack,
+ * datablocks and permanent arrays must not be freed because these are
+ * calls by reference to a continuing global variable.
+ * So the caller must clear the type field before calling free_value.
  */
 void
 free_value(struct value *a)
 {
-    gpfree_string(a);
-    gpfree_datablock(a);
-    gpfree_array(a);
+    switch (a->type) {
+	case INTGR:
+	case CMPLX:
+			break;
+	case STRING:
+			gpfree_string(a);
+			break;
+	case ARRAY:
+			gpfree_array(a);
+			break;
+	case DATABLOCK:
+			gpfree_datablock(a);
+			break;
+	case FUNCTIONBLOCK:
+			gpfree_functionblock(a);
+			break;
+	case VOXELGRID: /* Should not happen! */
+	default:	/* INVALID_VALUE INVALID_NAME */
+			break;
+    }
+    a->type = NOTDEFINED;
 }
 
-/* It is always safe to call gpfree_string with a->type is INTGR or CMPLX.
- * However it would be fatal to call it with a->type = STRING if a->string_val
- * was not obtained by a previous call to gp_alloc(), or has already been freed.
- * Thus 'a->type' is set to NOTDEFINED afterwards to make subsequent calls safe.
+/* It would be fatal to call gpfree_string with a->type = STRING if
+ * a->string_val has already been freed.
+ * Setting 'a->type' to NOTDEFINED makes subsequent calls safe.
  */
 void
 gpfree_string(struct value *a)
@@ -447,6 +513,22 @@ gpfree_array(struct value *a)
 	free(a->v.value_array);
 	a->type = NOTDEFINED;
     }
+}
+
+
+void
+init_array( struct udvt_entry *array, int size )
+{
+    struct value *A;
+    int i;
+
+    free_value(&array->udv_value);
+    array->udv_value.v.value_array = gp_alloc((size+1) * sizeof(t_value), "init_array");
+    array->udv_value.type = ARRAY;
+    A = array->udv_value.v.value_array;
+    A[0].v.int_val = size;
+    for (i = 0; i <= size; i++)
+	A[i].type = NOTDEFINED;
 }
 
 /* some machines have trouble with exp(-x) for large x
@@ -522,10 +604,15 @@ pop_or_convert_from_string(struct value *v)
 	char trailing = *eov;
 
 	/* If the string contains no decimal point, try to interpret it as an integer.
-	 * strtoll handles decimal, octal, and hexadecimal.
+	 * We treat a string starting with "0x" as a hexadecimal; everything else
+	 * as decimal.  So int("010") promotes to 10, not 8.
 	 */
 	if (strcspn(string, ".") == strlen(string)) {
-	    long long li = strtoll( string, &eov, 0 );
+	    long long li;
+	    if (string[0] == '0' && string[1] == 'x')
+		li = strtoll( string, &eov, 16 );
+	    else
+		li = strtoll( string, &eov, 10 );
 	    trailing = *eov;
 	    Ginteger(v, li);
 	}
@@ -542,7 +629,7 @@ pop_or_convert_from_string(struct value *v)
 	if (eov == string)
 	    int_error(NO_CARET,"Non-numeric string found where a numeric expression was expected");
 	if (trailing && !isspace(trailing))
-	    int_error(NO_CARET,"Trailing characters after numeric expression");
+	    int_warn(NO_CARET,"Trailing characters after numeric expression");
     }
     return(v);
 }
@@ -679,7 +766,13 @@ evaluate_at(struct at_type *at_ptr, struct value *val_ptr)
     val_ptr->type = NOTDEFINED;
 
     errno = 0;
-    reset_stack();
+
+    /* Normally the stack is cleared prior to each and every expression
+     * evaluation.   However doing so during execution of a function block
+     * can make the stack invalid when the function block exits.
+     */
+    if (!evaluate_inside_functionblock)
+	reset_stack();
 
     if (!evaluate_inside_using || !df_nofpe_trap) {
 	if (SETJMP(fpe_env, 1))
@@ -694,20 +787,32 @@ evaluate_at(struct at_type *at_ptr, struct value *val_ptr)
 
     if (errno == EDOM || errno == ERANGE)
 	undefined = TRUE;
-    else if (!undefined) {
-	(void) pop(val_ptr);
-	check_stack();
-    }
 
-    if (!undefined && val_ptr->type == ARRAY) {
-	/* Aug 2016: error rather than warning because too many places
-	 * cannot deal with UNDEFINED or NaN where they were expecting a number
-	 * E.g. load_one_range()
-	 */
-	val_ptr->type = NOTDEFINED;
-	if (!string_result_only)
-	    int_error(NO_CARET, "evaluate_at: unsupported array operation");
+    /* Pop value even if it is undefined.
+     * That seems preferable to leaving garbage on the stack.
+     */
+    if (s_p >= 0)
+	pop(val_ptr);
+    if (!evaluate_inside_functionblock)
+	check_stack();
+}
+
+void
+free_action_entry(struct at_entry *a)
+{
+    /* if union a->arg is used as a->arg.v_arg free potential string */
+    if ( a->index == PUSHC || a->index == DOLLARS )
+	gpfree_string(&(a->arg.v_arg));
+    /* a summation contains its own action table wrapped in a private udf */
+    if (a->index == SUM) {
+	real_free_at(a->arg.udf_arg->at);
+	free(a->arg.udf_arg);
     }
+#ifdef HAVE_EXTERNAL_FUNCTIONS
+    /* external function calls contain a parameter list */
+    if (a->index == CALLE)
+	free(a->arg.exf_arg);
+#endif
 }
 
 void
@@ -720,19 +825,7 @@ real_free_at(struct at_type *at_ptr)
         return;
     for (i=0; i<at_ptr->a_count; i++) {
 	struct at_entry *a = &(at_ptr->actions[i]);
-	/* if union a->arg is used as a->arg.v_arg free potential string */
-	if ( a->index == PUSHC || a->index == DOLLARS )
-	    gpfree_string(&(a->arg.v_arg));
-	/* a summation contains its own action table wrapped in a private udf */
-	if (a->index == SUM) {
-	    real_free_at(a->arg.udf_arg->at);
-	    free(a->arg.udf_arg);
-	}
-#ifdef HAVE_EXTERNAL_FUNCTIONS
-	/* external function calls contain a parameter list */
-	if (a->index == CALLE)
-	    free(a->arg.exf_arg);
-#endif
+	free_action_entry(a);
     }
     free(at_ptr);
 }
@@ -791,6 +884,10 @@ del_udv_by_name(char *key, TBOOLEAN wildcard)
 
  	/* exact match */
 	else if (!wildcard && !strcmp(key, udv_ptr->udv_name)) {
+	    if (called_from(udv_ptr->udv_name)) {
+		FPRINTF((stderr, "cannot self-delete %s", udv_ptr->udv_name));
+		break;
+	    }
 	    gpfree_vgrid(udv_ptr);
 	    free_value(&(udv_ptr->udv_value));
 	    udv_ptr->udv_value.type = NOTDEFINED;
@@ -799,6 +896,10 @@ del_udv_by_name(char *key, TBOOLEAN wildcard)
 
 	/* wildcard match: prefix matches */
 	else if ( wildcard && !strncmp(key, udv_ptr->udv_name, strlen(key)) ) {
+	    if (called_from(udv_ptr->udv_name)) {
+		FPRINTF((stderr, "cannot self-delete %s", udv_ptr->udv_name));
+		break;
+	    }
 	    gpfree_vgrid(udv_ptr);
 	    free_value(&(udv_ptr->udv_value));
 	    udv_ptr->udv_value.type = NOTDEFINED;
@@ -808,6 +909,20 @@ del_udv_by_name(char *key, TBOOLEAN wildcard)
 	udv_ptr = udv_ptr->next_udv;
     }
 }
+
+#ifdef USE_WATCHPOINTS
+struct udft_entry *
+get_udf_by_token(int t_num)
+{
+    struct udft_entry **udf_ptr = &first_udf;
+    while (*udf_ptr) {
+	if (equals(t_num, (*udf_ptr)->udf_name))
+	    return *udf_ptr;
+	udf_ptr = &((*udf_ptr)->next_udf);
+    }
+    return NULL;
+}
+#endif
 
 /* Clear (delete) all user defined functions */
 void
@@ -1129,3 +1244,67 @@ gp_word(char *string, int i)
     return a.v.string_val;
 }
 
+/* New (version 5.5)
+ * The evaluation stack can now return an ARRAY value, but in order to do so
+ * without memory leaks or corruption it must make sure that the allocated
+ * content is distinct from the original content.
+ * I.e. {array A = ["foo"]; B = A; A = 0;} must leave a valid copy of "foo" in B[1].
+ */
+void
+make_array_permanent(struct value *array)
+{
+    struct value *copy;
+    int i, size;
+
+    /* If this array was generated by the evaluation stack it is safe to use
+     * but the temporary flag must be cleared.
+     */
+    if (array->v.value_array[0].type == TEMP_ARRAY) {
+	array->v.value_array[0].type = NOTDEFINED;
+	return;
+    }
+
+    /* If it was a pre-existing array (no temporary flag) then we must make
+     * a clean copy of the whole thing.
+     */
+    size = array->v.value_array[0].v.int_val;
+    copy = gp_alloc( (size+1) * sizeof(struct value), "array copy");
+    memcpy( copy, array->v.value_array, (size+1) * sizeof(struct value) );
+    for (i=0; i<= size; i++) {
+	if (copy[i].type == STRING)
+	    copy[i].v.string_val = strdup(copy[i].v.string_val);
+    }
+    copy[0].type = NOTDEFINED;
+    array->v.value_array = copy;
+}
+
+/* Extract a portion of the array full[N] into a new array slice[M]
+ * where M <= N
+ */
+struct value *
+array_slice( struct value *full, int beg, int end)
+{
+    struct value *array = full->v.value_array;
+    struct value *slice;
+    int i,j;
+
+    /* Sanity checks */
+    if (beg < 1)
+	beg = 1;
+    if (end > array[0].v.int_val)
+	end = array[0].v.int_val;
+    if (end < beg)
+	beg = 1, end = 0;
+
+    slice = gp_alloc( (2 + end - beg) * sizeof(struct value), "array slice" );
+    slice[0].type = TEMP_ARRAY;
+    slice[0].v.int_val = 1 + end - beg;
+
+    for (i = beg, j = 1; i <= end; i++,j++) {
+	slice[j] = array[i];
+	if (slice[j].type == STRING)
+	    slice[j].v.string_val = strdup(slice[j].v.string_val);
+    }
+
+    return slice;
+}

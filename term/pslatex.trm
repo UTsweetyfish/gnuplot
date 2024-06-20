@@ -118,7 +118,8 @@ TERM_PUBLIC char *epslatex_header = NULL;
 #include "post.h"
 
 struct pstex_text_command {
-    int x, y, angle, justify;
+    int x, y, justify;
+    float angle;
     char *label;
     struct pstex_text_command *next;
 };
@@ -375,7 +376,7 @@ PSTEX_text()
         if ((ps_params->rotate) && (tc->angle != 0))
             fprintf(gpoutfile, "\
 %%\n  \\special{ps: gsave currentpoint currentpoint translate\n\
-%d rotate neg exch neg exch translate}%%\n  ", 360 - tc->angle);
+%.2f rotate neg exch neg exch translate}%%\n  ", 360 - tc->angle);
         if ((ps_params->terminal == PSTERM_PSLATEX) &&
             ((tc->label[0] == '{') || (tc->label[0] == '['))) {
             fprintf(gpoutfile, "\\makebox(0,0)%s", tc->label);
@@ -524,8 +525,10 @@ EPSLATEX_common_init()
 	    if (ISCAIROTERMINAL)
 		fprintf(gpoutfile, "\\usepackage{transparent}\n");
 
-            if (inputenc)
+            if (inputenc) {
+                fprintf(gpoutfile, "\\usepackage{ucs}\n");
                 fprintf(gpoutfile, "\\usepackage[%s]{inputenc}\n", inputenc);
+	    }
 
             fprintf(gpoutfile, "\
 \\makeatletter\n\
@@ -754,7 +757,7 @@ EPSLATEX_put_text(unsigned int x, unsigned int y, const char *str)
 	} else {
 	    fprintf(gpoutfile, "      \\put(%d,%d){", x, y);
 	    if (ps_ang)
-		fprintf(gpoutfile,"\\rotatebox{%d}{", ps_ang);
+		fprintf(gpoutfile,"\\rotatebox{%.2f}{", ps_ang);
 	    if (((str[0] == '{') || (str[0] == '['))) {
 		fprintf(gpoutfile, "\\makebox(0,0)%s", str);
 	    } else {
@@ -1075,7 +1078,8 @@ TERM_TABLE_START(epslatex_driver)
     PS_text, null_scale, PS_graphics, PS_move,
     PS_vector, EPSLATEX_linetype, EPSLATEX_put_text, PS_text_angle,
     PS_justify_text, PS_point, do_arrow, PS_set_font,
-    PS_pointsize, TERM_BINARY|TERM_IS_POSTSCRIPT|TERM_CAN_CLIP|TERM_IS_LATEX /*flags */,
+    PS_pointsize,
+    TERM_BINARY|TERM_IS_POSTSCRIPT|TERM_CAN_CLIP|TERM_IS_LATEX|TERM_REUSES_BOXTEXT,
     0 /*suspend */, 0 /*resume */,
     PS_fillbox, PS_linewidth,
 #ifdef USE_MOUSE

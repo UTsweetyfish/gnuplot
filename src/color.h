@@ -34,7 +34,8 @@ typedef enum colortype {
 	TC_CB		= 4,	/* "palette cb <value>" */
 	TC_FRAC		= 5,	/* "palette frac <value> */
 	TC_Z		= 6,	/* "palette z" */
-	TC_VARIABLE	= 7	/* only used for "tc", never "lc" */
+	TC_VARIABLE	= 7,	/* only used for "tc", never "lc" */
+	TC_COLORMAP	= 8	/* "palette colormap" */
 } colortype;
 
 /* Generalized pm3d-compatible color specifier
@@ -69,9 +70,21 @@ typedef enum {
     SMPAL_COLOR_MODE_FUNCTIONS = 'f', /* user defined transforms */
     SMPAL_COLOR_MODE_GRADIENT = 'd',  /* interpolated table:
 				       * explicitly defined or read from file */
-    SMPAL_COLOR_MODE_CUBEHELIX = 'c'
+    SMPAL_COLOR_MODE_CUBEHELIX = 'c',
+    SMPAL_COLOR_MODE_VIRIDIS = 'v'
 } palette_color_mode;
 
+/*
+ *    color gradient type
+ */
+typedef enum {
+    SMPAL_GRADIENT_TYPE_NONE     = 0,
+    SMPAL_GRADIENT_TYPE_SMOOTH   = 1, /* smooth palette */
+    SMPAL_GRADIENT_TYPE_DISCRETE = 2, /* (full) discrete palette */
+    SMPAL_GRADIENT_TYPE_MIXED    = 3, /* partially discrete palette */
+} palette_gradient_type;
+
+#define CHECK_SMPAL_IS_DISCRETE_GRADIENT (sm_palette.colorMode == SMPAL_COLOR_MODE_GRADIENT && sm_palette.gradient_type == SMPAL_GRADIENT_TYPE_DISCRETE)
 
 /* Contains a colour in RGB scheme.
    Values of  r, g and b  are all in range [0;1] */
@@ -172,10 +185,19 @@ typedef struct {
    * Then a truncated gray value may miss the gradient it belongs in. */
   double smallest_gradient_interval;
 
+  /* 
+   * Identifier of color gradient type which is one of, 
+   *   1. Smooth gradient (SMPAL_GRADIENT_TYPE_SMOOTH)
+   *   2. Discrete gradient (SMPAL_GRADIENT_TYPE_DISCRETE)
+   *   3. Smooth and Discrete Mixed gradient (SMPAL_GRADIENT_TYPE_MIXED)
+   * This value set by the routine 'check_palette_gradient_type'.
+   */
+  int gradient_type;
+
   /* the used color model: RGB, HSV, CMY */
   int cmodel;
 
-  /* Three mapping function for gray->RGB/HSV/CMY mapping
+  /* Three mapping function for gray->RGB/HSV/CMY/etc. mapping
    * used if colorMode == SMPAL_COLOR_MODE_FUNCTIONS */
   struct udft_entry Afunc;  /* R for RGB, H for HSV, C for CMY, ... */
   struct udft_entry Bfunc;  /* G for RGB, S for HSV, M for CMY, ... */
@@ -189,6 +211,9 @@ typedef struct {
   double cubehelix_cycles;	/* number of times round the colorwheel */
   double cubehelix_saturation;	/* color saturation */
 
+  /* offset for HSV color mapping */
+  double HSV_offset;		/* offset (radians) from colorwheel 0 */
+
 } t_sm_palette;
 
 
@@ -196,6 +221,7 @@ typedef struct {
 /* GLOBAL VARIABLES */
 
 extern t_sm_palette sm_palette;
+extern int enable_reset_palette;
 
 
 /* ROUTINES */
@@ -209,8 +235,12 @@ void init_color(void);  /* call once to initialize variables */
   Put number of allocated colours into sm_palette.colors
 */
 int make_palette(void);
+void reset_palette(void);
 
 void invalidate_palette(void);
+void check_palette_gradient_type(void);
+
+void set_palette(void);
 
 /*
    Send current colour to the terminal
@@ -228,7 +258,21 @@ void draw_color_smooth_box(int plot_mode);
  Support for user-callable routines
 */
 void f_hsv2rgb(union argument *);
+void f_rgbcolor(union argument *);
 void f_palette(union argument *);
+
+/*
+ * miscellaneous color conversions
+ */
+unsigned int rgb_from_colorspec(struct t_colorspec *tc);
+unsigned int rgb_from_gray( double gray );
+
+/*
+ * Support for colormaps (named palettes)
+ */
+unsigned int rgb_from_colormap(double gray, udvt_entry *colormap);
+double map2gray(double z, udvt_entry *colormap);
+void get_colormap_range( udvt_entry *colormap, double *cm_min, double *cm_max );
 
 #endif /* COLOR_H */
 

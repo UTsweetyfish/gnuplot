@@ -46,15 +46,15 @@
  * and/or other materials provided with the distribution.
  *
  * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE 
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE 
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR 
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF 
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS 
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN 
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) 
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE 
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
  *
 ]*/
@@ -89,19 +89,21 @@ unsigned int b_planes;		/* number of color planes */
 unsigned int b_psize;		/* size of each plane */
 unsigned int b_rastermode;	/* raster mode rotates -90deg */
 unsigned int b_linemask = 0xffff; /* 16 bit mask for dotted lines */
-unsigned int b_angle;		/* rotation of text */
+         int b_angle;		/* rotation of text */
+enum JUSTIFY b_justify = LEFT;	/* text justification */
 
 int b_maskcount = 0;
 
 /* Local prototypes */
-static void b_putc(unsigned int, unsigned int, int, unsigned int);
 static GP_INLINE void b_setpixel(unsigned int x, unsigned int y, unsigned int value);
 static GP_INLINE void b_setmaskpixel(unsigned int x, unsigned int y, unsigned int value);
 static void b_line(unsigned int x1, unsigned int y1, unsigned int x2, unsigned int y2);
+static void b_wline(unsigned int x1, unsigned int y1, unsigned int x2, unsigned int y2);
 
 /* file-scope variables */
 
 static unsigned int b_value = 1; /* colour of lines */
+static double       b_lw = 1;	/* line width */
 static unsigned int b_currx, b_curry; /* the current coordinates */
 static unsigned int b_hchar;	/* width of characters */
 static unsigned int b_hbits;	/* actual bits in char horizontally */
@@ -744,10 +746,10 @@ static unsigned char fill_pattern_bitmaps[fill_pattern_num][8] ={
    ,{ 0x82, 0x44, 0x28, 0x10, 0x28, 0x44, 0x82, 0x01 } /* cross-hatch      (1) */
    ,{ 0x88, 0x55, 0x22, 0x55, 0x88, 0x55, 0x22, 0x55 } /* double crosshatch(2) */
    ,{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff } /* solid fill       (3) */
-   ,{ 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80 } /* diagonal stripes (4) */
-   ,{ 0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01 } /* diagonal stripes (5) */
-   ,{ 0x11, 0x11, 0x22, 0x22, 0x44, 0x44, 0x88, 0x88 } /* diagonal stripes (6) */
-   ,{ 0x88, 0x88, 0x44, 0x44, 0x22, 0x22, 0x11, 0x11 } /* diagonal stripes (7) */
+   ,{ 0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01 } /* diagonal stripes (4) */
+   ,{ 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80 } /* diagonal stripes (5) */
+   ,{ 0x88, 0x88, 0x44, 0x44, 0x22, 0x22, 0x11, 0x11 } /* diagonal stripes (6) */
+   ,{ 0x11, 0x11, 0x22, 0x22, 0x44, 0x44, 0x88, 0x88 } /* diagonal stripes (7) */
 #if (0)
    ,{ 0x03, 0x0C, 0x30, 0xC0, 0x03, 0x0C, 0x30, 0xC0 } /* diagonal stripes (8) */
    ,{ 0xC0, 0x30, 0x0C, 0x03, 0xC0, 0x30, 0x0C, 0x03 } /* diagonal stripes (9) */
@@ -797,6 +799,16 @@ b_setpixel(unsigned int x, unsigned int y, unsigned int value)
 
 
 /*
+ * set pixel (x, y) to the set value
+ */
+void
+b_putpixel(unsigned int x, unsigned int y)
+{
+    b_setpixel(x, y, b_value);
+}
+
+
+/*
  * get pixel (x,y) value
  */
 unsigned int
@@ -804,7 +816,7 @@ b_getpixel(unsigned int x, unsigned int y)
 {
     unsigned int row;
     unsigned char mask;
-    unsigned short value=0; /* HBB 991123: initialize! */
+    unsigned int value=0; /* HBB 991123: initialize! */
     int i;
 
     if (b_rastermode) {
@@ -968,6 +980,78 @@ b_line(unsigned int x1, unsigned int y1, unsigned int x2, unsigned int y2)
 }
 
 
+/* draw a wide line (solid only, no dash pattern */
+/* code from sixeltek terminal by Erik Olofsen */
+static void
+b_wline(unsigned int x1, unsigned int y1, unsigned int x2, unsigned int y2)
+{
+    int runcount;
+    int dx, dy;
+    int xinc, yinc;
+    unsigned int xplot, yplot;
+    unsigned int i, wh, wh2;
+    int x;
+
+    if (b_lw <= 1.) {
+	b_line(x1, y1, x2, y2);
+	return;
+    }
+
+    wh = (int) (b_lw + 0.5);
+    wh2 = wh / 2;
+
+    /* algorithm from bitmap.c */
+    runcount = 0;
+    dx = abs((int) (x1) - (int) (x2));
+    if (x2 > x1)
+	xinc = 1;
+    else if (x2 == x1)
+	xinc = 0;
+    else
+	xinc = -1;
+    dy = abs((int) (y1) - (int) (y2));
+    if (y2 > y1)
+	yinc = 1;
+    else if (y2 == y1)
+	yinc = 0;
+    else
+	yinc = -1;
+    xplot = x1;
+    yplot = y1;
+    if (dx > dy) {
+	/* iterate x */
+	while (xplot != x2) {
+	    xplot += xinc;
+	    runcount += dy;
+	    if (runcount >= (dx - runcount)) {
+		yplot += yinc;
+		runcount -= dx;
+	    }
+	    for (i = 1; i <= wh; i++) {
+		x = xplot - wh2;
+		/* for (x = (int) xplot - (int) wh2; dx <= ((int) xplot - (int) wh2 + wh); x++) */
+		   b_setpixel(x, yplot - wh2 + i, b_value);
+	    }
+	}
+    } else {
+	/* iterate y */
+	while (yplot != y2) {
+	    yplot += yinc;
+	    runcount += dx;
+	    if (runcount >= (dy - runcount)) {
+		xplot += xinc;
+		runcount -= dy;
+	    }
+	    for (i = 1; i <= wh; i++) {
+		x = xplot - wh2;
+		/* for (x = (int) xplot - (int) wh2; dx <= ((int) xplot - (int) wh2 + wh); x++) */
+		   b_setpixel(x, yplot - wh2 + i, b_value);
+	    }
+	}
+    }
+}
+
+
 /*
  * set character size
  */
@@ -1007,57 +1091,7 @@ b_charsize(unsigned int size)
 
 
 /*
- * put characater c at (x,y) rotated by angle with color b_value.
- */
-static
-void b_putc(unsigned int x, unsigned int y, int c, unsigned int c_angle)
-{
-    unsigned int i, j, k;
-    char_row fc;
-
-    j = c - ' ';
-
-    if (j >= FNT_CHARS)
-	return;			/* unknown (top-bit-set ?) character */
-
-    for (i = 0; i < b_vbits; i++) {
-	fc = b_font[j][i];
-	if (c == '_') {		/* treat underline specially */
-	    if (fc) {		/* this this the underline row ? */
-		/* draw the under line for the full h_char width */
-		for (k = (b_hbits - b_hchar) / 2;
-		     k < (b_hbits + b_hchar) / 2; k++) {
-		    switch (c_angle) {
-		    case 0:
-			b_setpixel(x + k + 1, y + i, b_value);
-			break;
-		    case 1:
-			b_setpixel(x - i, y + k + 1, b_value);
-			break;
-		    }
-		}
-	    }
-	} else {
-	    /* draw character */
-	    for (k = 0; k < b_hbits; k++) {
-		if ((fc >> k) & 1) {
-		    switch (c_angle) {
-		    case 0:
-			b_setpixel(x + k + 1, y + i, b_value);
-			break;
-		    case 1:
-			b_setpixel(x - i, y + k + 1, b_value);
-			break;
-		    }
-		}
-	    }
-	}
-    }
-}
-
-
-/*
-   ** set b_linemask to b_pattern[linetype]
+ * set b_linemask to b_pattern[linetype]
  */
 void
 b_setlinetype(int linetype)
@@ -1069,6 +1103,29 @@ b_setlinetype(int linetype)
 
     b_linemask = b_pattern[linetype + 2];
     b_maskcount = 0;
+}
+
+
+void
+b_dashtype(int type, t_dashtype *custom_dash_type)
+{
+    if (type >= 0)
+	;
+    else if (type == DASHTYPE_AXIS)
+	type = LT_AXIS;
+    else
+	type = LT_SOLID; /* solid, also for custom dash types */
+    b_setlinetype(type);
+}
+
+
+/*
+ * set l_lw to linewidth
+ */
+void
+b_linewidth(double linewidth)
+{
+    b_lw = linewidth;
 }
 
 
@@ -1102,7 +1159,7 @@ b_vector(unsigned int x, unsigned int y)
     /* We can't clip properly, but we can refuse to draw out of bounds */
     if (x < term->xmax && y < term->ymax
     &&  b_currx < term->xmax && b_curry < term->ymax)
-	b_line(b_currx, b_curry, x, y);
+	b_wline(b_currx, b_curry, x, y);
     b_currx = x;
     b_curry = y;
 }
@@ -1112,30 +1169,75 @@ b_vector(unsigned int x, unsigned int y)
  * put text str at (x,y) with color b_value and rotation b_angle
  */
 void
-b_put_text(unsigned int x, unsigned int y, const char *str)
+b_put_text(unsigned int x0, unsigned int y0, const char *str)
 {
-    if (b_angle == 1)
-	x += b_vchar / 2;
-    else
-	y -= b_vchar / 2;
-    switch (b_angle) {
-    case 0:
-	for (; *str; ++str, x += b_hchar)
-	    b_putc(x, y, *str, b_angle);
+    int i, j, k;
+    float sa, ca, x, y;
+    char_row fc;
+    size_t l;
+
+    ca = cos(DEG2RAD * b_angle);
+    sa = sin(DEG2RAD * b_angle);
+
+    x = 0.5f + x0;
+    y = 0.5f + y0;
+
+    switch (b_justify) {
+    case LEFT:
+	x += sa * b_vchar / 2.f;
+	y -= ca * b_vchar / 2.f;
 	break;
-    case 1:
-	for (; *str; ++str, y += b_hchar)
-	    b_putc(x, y, *str, b_angle);
+    case CENTRE:
+	l = strlen(str);
+	x += sa * b_vchar / 2.f - ca * l * b_hchar / 2;
+	y -= ca * b_vchar / 2.f + sa * l * b_hchar / 2;
 	break;
+    case RIGHT:
+	l = strlen(str);
+	x += sa * b_vchar / 2.f - ca * l * b_hchar;
+	y -= ca * b_vchar / 2.f + sa * l * b_hchar;
+	break;
+    }
+
+    k = 0;
+    while (str[k]) {
+	char c = GPMAX(str[k], ' ') - ' ';
+	if (c >= FNT_CHARS) c = 0;
+	for (i = 0; i < b_vbits; i++) {
+	    fc = b_font[(unsigned char)c][i];
+	    if (c == '_' - ' ') {	/* treat underline specially */
+		if (fc) {		/* this this the underline row ? */
+		    /* draw the under line for the full h_char width */
+		    for (j = 0; j < b_hchar; j++)
+			b_setpixel(x + ca * j - sa * i, y + ca * i + sa * j, b_value);
+		}
+	    } else {
+		for (j = 0; j < b_hbits; j++) {
+		    if ((fc >> j) & 1)
+			b_setpixel(x + ca * j - sa * i, y + ca * i + sa * j, b_value);
+		}
+	    }
+	}
+	k++;
+	x += ca * b_hchar;
+	y += sa * b_hchar;
     }
 }
 
 
 int
-b_text_angle(int ang)
+b_text_angle(float ang)
 {
-    b_angle = (unsigned int) (ang ? 1 : 0);
+    b_angle = ang;
     return TRUE;
+}
+
+
+int
+b_justify_text(enum JUSTIFY mode)
+{
+    b_justify = mode;
+    return 1;
 }
 
 
@@ -1147,28 +1249,40 @@ b_boxfill(
     unsigned int w, unsigned int h)
 {
     unsigned int ix, iy;
-    int pixcolor, actpix, pat, mask, idx, bitoffs;
+    int pixcolor, pat, mask, idx, bitoffs;
     unsigned char *fillbitmap;
+    TBOOLEAN transparent = FALSE;
 
-    switch( style & 0xf ) {
+    switch (style & 0xf) {
+    case FS_TRANSPARENT_SOLID:
+	transparent = TRUE;
+	/* fall-through */
     case FS_SOLID:
 	/* use halftone fill pattern according to filldensity */
 	/* filldensity is from 0..100 percent */
-	idx = (int) ((style >> 4) * (fill_halftone_num - 1) / 100 );
-	if( idx < 0 )
+	idx = (int) (((style >> 4) * (fill_halftone_num - 1) + 50) / 100 );
+	if (idx < 0)
 	    idx = 0;
-	if( idx >= fill_halftone_num )
-	    idx = fill_halftone_num-1;
+	if (idx >= fill_halftone_num)
+	    idx = fill_halftone_num - 1;
 	fillbitmap = fill_halftone_bitmaps[idx];
 	pixcolor = b_value;
 	break;
+    case FS_TRANSPARENT_PATTERN:
+	transparent = TRUE;
+	/* fall-through */
     case FS_PATTERN:
 	/* use fill pattern according to fillpattern */
 	idx = (style >> 4);  /* fillpattern is enumerated */
-	if( idx < 0 )
+	if (idx < 0)
 	    idx = 0;
 	idx %= fill_pattern_num;
 	fillbitmap = fill_pattern_bitmaps[idx];
+	pixcolor = b_value;
+	break;
+    case FS_DEFAULT:
+	/* Fill with current color, wherever it came from */
+	fillbitmap = fill_halftone_bitmaps[fill_halftone_num - 1];
 	pixcolor = b_value;
 	break;
     case FS_EMPTY:
@@ -1181,24 +1295,107 @@ b_boxfill(
     /* this implements a primitive raster generator, which plots the */
     /* bitmaps point by point calling b_setpixel(). Perhaps someone */
     /* will implement a more efficient solution */
-
-    bitoffs=0;
-    for (iy = y; iy < y+h; iy++) { /* box height */
-	pat = fillbitmap[bitoffs % fill_bitmap_width];
-	bitoffs++;
-	mask = 1 << (fill_bitmap_width - 1);
-	for (ix = x; ix < x+w; ix++) { /* box width */
+    for (iy = y; iy < y + h; iy++) { /* box height */
+	bitoffs = iy % fill_bitmap_width;
+	pat = fillbitmap[bitoffs];
+	for (ix = x; ix < x + w; ix++) { /* box width */
+	    mask = 1 << (ix % fill_bitmap_width);
 	    /* actual pixel = 0 or color, according to pattern */
-	    actpix = (pat & mask) ? pixcolor : 0;
-	    mask >>= 1;
-	    if( mask == 0 ) {
-		mask = 1 << (fill_bitmap_width - 1);
-	    }
-	    b_setpixel(ix, iy, actpix);
+	    if (pat & mask)
+		b_setpixel(ix, iy, pixcolor);
+	    else if (!transparent)
+		b_setpixel(ix, iy, 0);
 	}
     }
 
 }
 
+/* code from sixeltek terminal by Erik Olofsen */
+void
+b_filled_polygon(int points, gpiPoint *corners)
+{
+    int nodes, *nodex, px, py, i, j, swap;
+    int style = corners->style;
+    int pixcolor, pat, mask, idx, bitoffs;
+    unsigned char *fillbitmap;
+    TBOOLEAN transparent = FALSE;
 
+    switch (style & 0xf) {
+    case FS_TRANSPARENT_SOLID:
+	transparent = TRUE;
+	/* fall-through */
+    case FS_SOLID:
+	/* use halftone fill pattern according to filldensity */
+	/* filldensity is from 0..100 percent */
+	idx = GPMAX((int) (((style >> 4) * (fill_halftone_num - 1) + 50) / 100), 0);
+	if (idx >= fill_halftone_num)
+	    idx = fill_halftone_num - 1;
+	fillbitmap = fill_halftone_bitmaps[idx];
+	pixcolor = b_value;
+	break;
+    case FS_TRANSPARENT_PATTERN:
+	transparent = TRUE;
+	/* fall-through */
+    case FS_PATTERN:
+	/* use fill pattern according to fillpattern */
+	idx = GPMAX((style >> 4), 0);  /* fillpattern is enumerated */
+	idx %= fill_pattern_num;
+	fillbitmap = fill_pattern_bitmaps[idx];
+	pixcolor = b_value;
+	break;
+    case FS_DEFAULT:
+	/* Fill with current color, wherever it came from */
+	fillbitmap = fill_halftone_bitmaps[fill_halftone_num - 1];
+	pixcolor = b_value;
+	break;
+    case FS_EMPTY:
+    default:
+	/* fill with background color */
+	fillbitmap = fill_halftone_bitmaps[0];
+	pixcolor = 0;
+    }
 
+    nodex = (int *) malloc(sizeof(int) * points);
+
+    for (py = 0; py < b_ysize; py++) {
+	bitoffs = py % fill_bitmap_width;
+	pat = fillbitmap[bitoffs];
+
+	nodes = 0;
+	j = points - 1;
+	for (i = 0; i < points; i++) {
+	    if ((corners[i].y < py && corners[j].y >= py) ||
+		(corners[j].y < py && corners[i].y >= py)) {
+		nodex[nodes++] = (int) ((corners[i].x + (double)(py - corners[i].y) /
+					  (double)(corners[j].y - corners[i].y) *
+					  (corners[j].x - corners[i].x)) + 0.5);
+	    }
+	    j = i;
+	}
+
+	i = 0;
+	while (i < nodes - 1) {
+	    if (nodex[i] > nodex[i + 1]) {
+		swap = nodex[i];
+		nodex[i] = nodex[i + 1];
+		nodex[i + 1] = swap;
+		if (i) i--;
+	    } else {
+		i++;
+	    }
+	}
+
+	for (i = 0; i < nodes; i += 2) {
+	    for (px = nodex[i]; px < nodex[i + 1]; px++) {
+		mask = 1 << (px % fill_bitmap_width);
+		/* actual pixel = 0 or color, according to pattern */
+		if (pat & mask)
+		    b_setpixel(px, py, pixcolor);
+		else if (!transparent)
+		    b_setpixel(px, py, 0);
+	    }
+	}
+    }
+
+    free(nodex);
+}

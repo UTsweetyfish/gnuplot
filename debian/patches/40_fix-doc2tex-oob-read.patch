@@ -1,0 +1,17 @@
+Description: Fix OOB read for doc2tex utility
+ This patch fixes an out-of-bound read for doc2tex utility.
+Author: Zixing Liu <zixing.liu@canonical.com>
+Forwarded: no
+Last-Update: 2024-03-12
+
+--- gnuplot-6.0.0+dfsg1.orig/docs/doc2tex.c
++++ gnuplot-6.0.0+dfsg1/docs/doc2tex.c
+@@ -549,7 +549,7 @@ puttex( char *str, FILE *file)
+ 		inquote = FALSE;
+ 	    } else {
+ 		(void) fputs("{\\bf ", file);
+-		for (i=0; i<MAX_LINE_LEN && ((c=str[i]) != '`') ; i++){
++		for (i=0; i<MAX_LINE_LEN && ((c=str[i]) != '`'&& c != '\0') ; i++){
+                     string[i] = c;
+                 }
+ 		string[i] = NUL;

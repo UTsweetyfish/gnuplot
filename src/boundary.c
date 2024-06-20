@@ -35,6 +35,7 @@
 #include "alloc.h"
 #include "axis.h"
 #include "misc.h"
+#include "plot2d.h"
 #include "pm3d.h"	/* for is_plot_with_palette */
 
 #define ERRORBARTIC GPMAX((t->h_tic/2),1)
@@ -107,7 +108,7 @@ boundary(struct curve_points *plots, int count)
     legend_key *key = &keyT;
 
     struct termentry *t = term;
-    int can_rotate = (*t->text_angle) (TEXT_VERTICAL);
+    TBOOLEAN can_rotate = (*t->text_angle) (TEXT_VERTICAL);
 
     int xtic_textheight=0;	/* height of xtic labels */
     int x2tic_textheight=0;	/* height of x2tic labels */
@@ -233,7 +234,7 @@ boundary(struct curve_points *plots, int count)
 
     /* Polar (theta) tic labels need space at top and bottom of plot */
     if (THETA_AXIS.ticmode) {
-	/* FIXME:  Really 5% of polar grid radius, but we don't know that yet */
+	/* Really wants to be 5% of polar grid radius, but we don't know that yet */
 	ttic_textheight = 2. * t->v_char;
     }
 
@@ -632,9 +633,14 @@ boundary(struct curve_points *plots, int count)
 	    R_AXIS.max = axis_array[FIRST_X_AXIS].max;
 	    int_warn(NO_CARET, "resetting rrange");
 	}
-	setup_tics(&axis_array[POLAR_AXIS], 10);
-    }
 
+	setup_tics(&axis_array[POLAR_AXIS], 10);
+
+	/* If setup_tics extends rrange to next tic then the previous
+	 * x/y range limits from polar_range_fiddling are out of date.
+	 */
+	polar_range_fiddling(&axis_array[FIRST_X_AXIS], &axis_array[FIRST_Y_AXIS]);
+    }
 
     /* Modify the bounding box to fit the aspect ratio, if any was given */
     if (aspect_ratio != 0.0) {
@@ -822,7 +828,6 @@ boundary(struct curve_points *plots, int count)
     /* Calculate limiting bounds of the key */
     do_key_bounds(key);
 
-
     /* Set default clipping to the plot boundary */
     clip_area = &plot_bounds;
 
@@ -832,6 +837,8 @@ boundary(struct curve_points *plots, int count)
 	int_warn(NO_CARET, "Terminal canvas area too small to hold plot."
 			"\n\t    Check plot boundary and font sizes.");
 
+    /* mark the entire region as available for mousing */
+    update_active_region();
 }
 
 /*}}} */
@@ -840,10 +847,19 @@ void
 do_key_bounds(legend_key *key)
 {
     struct termentry *t = term;
+    double dx, dy;
 
     key_height = key_title_height + key_title_extra
 		+ key_rows * key_entry_height + key->height_fix * key_entry_height;
-    key_width = key_col_wth * key_cols;
+
+    if (key->user_width.x == 0)
+	key_width = key_col_wth * key_cols;
+    if (key->user_width.x > 0) {
+	if (key->user_width.scalex == screen)
+	    key_width = key->user_width.x * (double)(t->xmax-1);
+	else if (key->user_width.scalex == graph)
+	    key_width = key->user_width.x * (plot_bounds.xright - plot_bounds.xleft);
+    }
 
     /* Key inside plot boundaries */
     if (key->region == GPKEY_AUTO_INTERIOR_LRTBC
@@ -926,12 +942,6 @@ do_key_bounds(legend_key *key)
     } else {
 	int x, y;
 
-	/* FIXME!!!
-	 * pm 22.1.2002: if key->user_pos.scalex or scaley == first_axes or second_axes,
-	 * then the graph scaling is not yet known and the box is positioned incorrectly;
-	 * you must do "replot" to avoid the wrong plot ... bad luck if output does not
-	 * go to screen
-	 */
 	map_position(&key->user_pos, &x, &y, "key");
 
 	/* Here top, bottom, left, right refer to the alignment with respect to point. */
@@ -948,6 +958,15 @@ do_key_bounds(legend_key *key)
 	    key->bounds.ytop += key_height;
 	key->bounds.ybot = key->bounds.ytop - key_height;
     }
+
+    /* Regardless of how the key was nominally positioned,
+     * the result can be manually tweaked by "set key offset dx, dy"
+     */
+    map_position_r(&key->offset, &dx, &dy, "key");
+    key->bounds.ytop += dy;
+    key->bounds.ybot += dy;
+    key->bounds.xleft += dx;
+    key->bounds.xright += dx;
 }
 
 /* Calculate positioning of components that make up the key box */
@@ -991,10 +1010,10 @@ do_key_layout(legend_key *key)
 	(void) estimate_strlen(key->title.text, &est_height);
 	key_title_height = est_height * t->v_char;
 	key_title_ypos = (key_title_height/2);
-	if (key->title.font)
-	    t->set_font("");
 	/* FIXME: empirical tweak. I don't know why this is needed */
 	key_title_ypos -= (est_lines-1) * t->v_char/2;
+	if (key->title.font)
+	    t->set_font((key->font) ? key->font : "");
     }
 
     if (key->reverse) {
@@ -1017,57 +1036,57 @@ do_key_layout(legend_key *key)
     }
     key_point_offset = (key_sample_left + key_sample_right) / 2;
 
-    /* advance width for cols */
+    /* advance width for cols (initial estimate; may change) */
     key_col_wth = key_size_left + key_size_right;
 
-    key_rows = ptitl_cnt;
-    key_cols = 1;
+    /* New option "require columns <ncol>" */
+    if (key->user_cols > 0) {
+	key_cols = key->user_cols;
+	key_rows = ceil((double)ptitl_cnt / (double)key_cols);
 
-    /* calculate rows and cols for key */
-
-    if (key->stack_dir == GPKEY_HORIZONTAL) {
-	/* maximise no cols, limited by label-length */
-	key_cols = (int) (plot_bounds.xright - plot_bounds.xleft) / key_col_wth;
-	if (key->maxcols > 0 && key_cols > key->maxcols)
-	    key_cols = key->maxcols;
-	/* EAM Dec 2004 - Rather than turn off the key, try to squeeze */
-	if (key_cols == 0) {
-	    key_cols = 1;
-	    key_panic = TRUE;
-	    key_col_wth = (plot_bounds.xright - plot_bounds.xleft);
-	}
-	key_rows = (ptitl_cnt + key_cols - 1) / key_cols;
-	/* now calculate actual no cols depending on no rows */
-	key_cols = (key_rows == 0) ? 1 : (ptitl_cnt + key_rows - 1) / key_rows;
-	if (key_cols == 0) {
-	    key_cols = 1;
-	}
     } else {
-	/* maximise no rows, limited by plot_bounds.ytop-plot_bounds.ybot */
-	int i = (plot_bounds.ytop - plot_bounds.ybot - key->height_fix * key_entry_height
-		    - key_title_height - key_title_extra)
-		/ key_entry_height;
-	if (key->maxrows > 0 && i > key->maxrows)
-	    i = key->maxrows;
+	/* calculate rows and cols for key */
+	key_rows = ptitl_cnt;
+	key_cols = 1;
 
-	if (i == 0) {
-	    i = 1;
-	    key_panic = TRUE;
-	}
-	if (ptitl_cnt > i) {
-	    key_cols = (ptitl_cnt + i - 1) / i;
-	    /* now calculate actual no rows depending on no cols */
+	if (key->stack_dir == GPKEY_HORIZONTAL) {
+	    /* maximise no cols, limited by label-length */
+	    key_cols = (int) (plot_bounds.xright - plot_bounds.xleft) / key_col_wth;
+	    if (key->maxcols > 0 && key_cols > key->maxcols)
+		key_cols = key->maxcols;
+	    /* EAM Dec 2004 - Rather than turn off the key, try to squeeze */
 	    if (key_cols == 0) {
 		key_cols = 1;
 		key_panic = TRUE;
+		key_col_wth = (plot_bounds.xright - plot_bounds.xleft);
 	    }
 	    key_rows = (ptitl_cnt + key_cols - 1) / key_cols;
-#if (0)
+	    /* now calculate actual no cols depending on no rows */
+	    key_cols = (key_rows == 0) ? 1 : (ptitl_cnt + key_rows - 1) / key_rows;
+	    if (key_cols == 0) {
+		key_cols = 1;
+	    }
 	} else {
-	    /* This was a work-around for a spiderplot bug. No longer needed? */
-	    if (key_rows == 0)
-		key_rows = i;
-#endif
+	    /* maximise no rows, limited by plot_bounds.ytop-plot_bounds.ybot */
+	    int i = (plot_bounds.ytop - plot_bounds.ybot - key->height_fix * key_entry_height
+			- key_title_height - key_title_extra)
+		    / key_entry_height;
+	    if (key->maxrows > 0 && i > key->maxrows)
+		i = key->maxrows;
+
+	    if (i == 0) {
+		i = 1;
+		key_panic = TRUE;
+	    }
+	    if (ptitl_cnt > i) {
+		key_cols = (ptitl_cnt + i - 1) / i;
+		/* now calculate actual no rows depending on no cols */
+		if (key_cols == 0) {
+		    key_cols = 1;
+		    key_panic = TRUE;
+		}
+		key_rows = (ptitl_cnt + key_cols - 1) / key_cols;
+	    }
 	}
     }
 
@@ -1077,7 +1096,8 @@ do_key_layout(legend_key *key)
 	if (key->title.font)
 	    t->set_font(key->title.font);
 	ytlen *= t->h_char;
-	if (ytlen > key_cols * key_col_wth)
+	if (ytlen > key_cols * key_col_wth
+	&&  key->user_width.x == 0)
 	    key_col_wth = ytlen / key_cols;
 	if (key->title.font)
 	    t->set_font("");
@@ -1144,6 +1164,8 @@ find_maxl_keys(struct curve_points *plots, int count, int *kcnt)
 	&&  !this_plot->title_position) {
 	    if (this_plot->plot_style == SPIDERPLOT && this_plot->plot_type != KEYENTRY)
 		; /* Nothing */
+	    if (this_plot->plot_style == HISTOGRAMS && this_plot->histogram->type == HT_STACKED_IN_TOWERS)
+		; /* These titles are placed as xtics rather than in the key */
 	    else {
 		ignore_enhanced(this_plot->title_no_enhanced);
 		len = estimate_strlen(this_plot->title, NULL);
@@ -1284,6 +1306,16 @@ do_key_sample(
 	    }
 	    free(key_ellipse);
 
+	} else if (this_plot->plot_style == SURFACEGRID) {
+	    (*t->fillbox)(style,x,y,w,h);
+
+        } else if (this_plot->plot_style == SECTORS && w > 0) {
+            do_sector(xl + key_point_offset, yl-key_sample_height, (3)*key_sample_height/4.0, (3+2)*key_sample_height/4.0, 120.0*DEG2RAD, 60.0*DEG2RAD, 1.0, style, FALSE);
+            /* Retrace the border if the style requests it */
+            if (need_fill_border(fs)) {
+                do_sector(xl + key_point_offset, yl-key_sample_height, (3)*key_sample_height/4.0, (3+2)*key_sample_height/4.0, 120.0*DEG2RAD, 60.0*DEG2RAD, 1.0, 0, FALSE);
+            }
+
 	} else if (w > 0) {    /* All other plot types with fill */
 	    if (style != FS_EMPTY)
 		(*t->fillbox)(style,x,y,w,h);
@@ -1291,7 +1323,7 @@ do_key_sample(
 	    /* need_fill_border will set the border linetype, but candlesticks don't want it */
 	    if ((this_plot->plot_style == CANDLESTICKS && fs->border_color.type == TC_LT
 							&& fs->border_color.lt == LT_NODRAW)
-	    ||   style == FS_EMPTY
+	    ||   (style == FS_EMPTY && this_plot->plot_style != POLYGONS)
 	    ||   need_fill_border(fs)) {
 		newpath();
 		draw_clip_line( xl + key_sample_left,  yl - key_sample_height/4,
@@ -1375,6 +1407,7 @@ do_key_sample_point(
     struct termentry *t = term;
     int xl_save = xl;
     int yl_save = yl;
+    int interval = this_plot->lp_properties.p_interval;
 
     /* If the plot this title belongs to specified a non-standard place
      * for the key sample to appear, use that to override xl, yl.
@@ -1389,13 +1422,16 @@ do_key_sample_point(
 
     (t->layer)(TERM_LAYER_BEGIN_KEYSAMPLE);
 
-    if (this_plot->plot_style == LINESPOINTS
-	 &&  this_plot->lp_properties.p_interval < 0) {
+    if ((this_plot->plot_style == LINESPOINTS && interval < 0)
+    ||  (this_plot->plot_style & PLOT_STYLE_HAS_ERRORBAR)) {
 	t_colorspec background_fill = BACKGROUND_COLORSPEC;
-	(*t->set_color)(&background_fill);
-	(*t->pointsize)(pointsize * pointintervalbox);
-	(*t->point)(xl + key_point_offset, yl, 6);
-	term_apply_lp_properties(&this_plot->lp_properties);
+	if ((this_plot->lp_properties.p_type != -1)
+	&&  (pointintervalbox != 0)) {
+	    (*t->set_color)(&background_fill);
+	    (*t->pointsize)(pointsize * pointintervalbox);
+	    (*t->point)(xl + key_point_offset, yl, 6);
+	    term_apply_lp_properties(&this_plot->lp_properties);
+	}
     }
 
     if (this_plot->plot_style == BOXPLOT) {
@@ -1423,7 +1459,16 @@ do_key_sample_point(
 
     } else if (this_plot->plot_style == LABELPOINTS) {
 	struct text_label *label = this_plot->labels;
-	if (label->lp_properties.flags & LP_SHOW_POINTS) {
+	if (this_plot->plot_type == KEYENTRY) {
+	    int anchor = xl;
+	    if (label->pos == LEFT)
+		anchor += key_sample_left;
+	    else if (label->pos == RIGHT)
+		anchor += key_sample_right;
+	    else
+		anchor += key_point_offset;
+	    write_label(anchor, yl, label);
+	} else if (label->lp_properties.flags & LP_SHOW_POINTS) {
 	    term_apply_lp_properties(&label->lp_properties);
 	    (*t->point) (xl + key_point_offset, yl, label->lp_properties.p_type);
 	}
@@ -1572,15 +1617,15 @@ advance_key(TBOOLEAN only_invert)
     legend_key *key = &keyT;
 
     if (key->invert)
-        yl = key->bounds.ybot + yl_ref + key_entry_height/2 - yl;
+	yl = key->bounds.ybot + yl_ref + key_entry_height/2 - yl;
     if (only_invert)
 	return;
     if (key_count >= key_rows) {
-        yl = yl_ref;
-        xl += key_col_wth;
-        key_count = 0;
+	yl = yl_ref;
+	xl += key_col_wth;
+	key_count = 0;
     } else
-        yl = yl - key_entry_height;
+	yl = yl - key_entry_height;
 }
 
 /* stupid test used in only one place but it refers to our local variables */

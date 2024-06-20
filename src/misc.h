@@ -58,10 +58,11 @@ void load_file(FILE *fp, char *name, int calltype);
 FILE *lf_top(void);
 TBOOLEAN lf_pop(void);
 void lf_push(FILE *fp, char *name, char *cmdline);
-void load_file_error(void);
+void lf_reset_after_error(void);
 FILE *loadpath_fopen(const char *, const char *);
 void push_terminal(int is_interactive);
 void pop_terminal(void);
+TBOOLEAN called_from(const char *name);
 
 /* moved here, from setshow */
 enum PLOT_STYLE get_style(void);
@@ -74,8 +75,11 @@ void arrow_use_properties(struct arrow_style_type *arrow, int tag);
 
 void parse_fillstyle(struct fill_style_type *fs);
 void parse_colorspec(struct t_colorspec *tc, int option);
+long lookup_color_name(char *string);
 long parse_color_name(void);
 TBOOLEAN need_fill_border(struct fill_style_type *fillstyle);
+struct udvt_entry *get_colormap(int token);
+void pixmap_from_colormap(t_pixmap *pixmap);
 
 void get_image_options(t_image *image);
 
@@ -93,9 +97,8 @@ typedef struct lf_state_struct {
     TBOOLEAN interactive;	/* value of interactive flag on entry */
     int inline_num;		/* inline_num on entry */
     int depth;			/* recursion depth */
-    int if_depth;		/* used by _old_ if/else syntax */
     TBOOLEAN if_open_for_else;	/* used by _new_ if/else syntax */
-    TBOOLEAN if_condition;	/* used by both old and new if/else syntax */
+    TBOOLEAN local_variables;	/* set if this depth is the scope for local variables */
     char *input_line;		/* Input line text to restore */
     struct lexical_unit *tokens;/* Input line tokens to restore */
     int num_tokens;		/* How big is the above ? */
@@ -104,6 +107,8 @@ typedef struct lf_state_struct {
     int call_argc;		/* This saves the _caller's_ argc */
     char *call_args[10];	/* ARG0 through ARG9 from "call" command */
     struct value argv[10];	/* content of global ARGV[] array */
+    struct at_type *shadow_at;	/* context of call to function block */
+    int shadow_at_size;  	/* context of call to function block */
 }  LFS;
 extern LFS *lf_head;
 

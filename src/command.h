@@ -43,7 +43,6 @@ extern int inline_num;
 
 extern int if_depth;			/* old if/else syntax only */
 extern TBOOLEAN if_open_for_else;	/* new if/else syntax only */
-extern TBOOLEAN if_condition;		/* used by both old and new syntax */
 
 typedef struct lexical_unit {	/* produced by scanner */
     TBOOLEAN is_token;		/* true if token, false if a value */
@@ -58,10 +57,18 @@ extern int plot_token;
 #define END_OF_COMMAND (c_token >= num_tokens || equals(c_token,";"))
 
 extern char *replot_line;
+extern TBOOLEAN last_plot_was_multiplot;
 
 /* flag to disable `replot` when some data are sent through stdin;
- * used by mouse/hotkey capable terminals */
+ * used by mouse/hotkey capable terminals
+ */
 extern TBOOLEAN replot_disabled;
+
+/* flag to show we are inside a plot/splot/replot/refresh/stats
+ * command and therefore should not allow starting another one
+ * e.g. from a function block
+ */
+extern TBOOLEAN inside_plot_command;
 
 #ifdef USE_MOUSE
 extern int paused_for_mouse;	/* Flag the end condition we are paused until */
@@ -78,7 +85,11 @@ extern int paused_for_mouse;	/* Flag the end condition we are paused until */
 extern FILE *print_out;
 extern struct udvt_entry * print_out_var;
 extern char *print_out_name;
+extern char *print_sep;
 
+/* Points to structure holding dummy parameter values
+ * to be used during function evaluation
+ */
 extern struct udft_entry *dummy_func;
 
 #ifndef STDOUT
@@ -153,6 +164,7 @@ void load_command(void);
 void begin_clause(void);
 void clause_reset_after_error(void);
 void end_clause(void);
+void local_command(void);
 void null_command(void);
 void pause_command(void);
 void plot_command(void);
@@ -163,6 +175,7 @@ void refresh_request(void);
 void refresh_command(void);
 void replot_command(void);
 void reread_command(void);
+void return_command(void);
 void save_command(void);
 void screendump_command(void);
 void splot_command(void);
@@ -171,7 +184,7 @@ void system_command(void);
 void test_command(void);
 void toggle_command(void);
 void update_command(void);
-void do_shell(void);
+void shell_command(void);
 void undefine_command(void);
 void while_command(void);
 
@@ -188,12 +201,10 @@ void toggle_display_of_ipc_commands(void);
 int display_ipc_commands(void);
 void do_string_replot(const char* s);
 #endif
-#ifdef VMS                     /* HBB 990829: used only on VMS */
-void done(int status);
-#endif
 void define(void);
 
 void replotrequest(void); /* used in command.c & mouse.c */
+void shadow_one_variable(struct udvt_entry *udv);
 
 void print_set_output(char *, TBOOLEAN, TBOOLEAN); /* set print output file */
 char *print_show_output(void); /* show print output file */
@@ -202,6 +213,7 @@ int do_system_func(const char *cmd, char **output);
 
 #ifdef OS2_IPC
 void os2_ipc_setup(void);
+int  os2_ipc_waitforinput(int mode);
 #endif
 
 #endif /* GNUPLOT_COMMAND_H */

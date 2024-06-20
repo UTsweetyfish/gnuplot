@@ -5,31 +5,31 @@ Description: temporarily disable demo plugin
 Author: Anton Gladky <gladk@debian.org>
 Last-Update: 2015-06-16
 
-Index: gnuplot-5.4.4/demo/Makefile.in
+Index: gnuplot/demo/Makefile.in
 ===================================================================
---- gnuplot-5.4.4.orig/demo/Makefile.in
-+++ gnuplot-5.4.4/demo/Makefile.in
-@@ -337,7 +337,6 @@ epslatex.ps epslatex.tex random.tmp stri
- 
+--- gnuplot.orig/demo/Makefile.in
++++ gnuplot/demo/Makefile.in
+@@ -340,7 +340,6 @@ latex_demo.log latex_demo.aux latex_cair
+ DISTCLEANFILES = Makefile.am Makefile.in
  BINARY_FILES = binary1 binary2 binary3
  SUBDIRS = $(PLUGIN_DIR)
 -DIST_SUBDIRS = plugin
  DEMO = all.dem
  GNUPLOT = gnuplot
- EXTRA_DIST = Makefile.am.in lena-keypoints.bin scatter2.bin sine.bin \
-@@ -391,7 +390,6 @@ GM1_sugar.pdb aries.png bldg.png gradien
- blutux.rgb lena.rgb sound.par sound2.par start.par gnuplot.rot gnu-valley \
- random-points gpdemos.tcl html 
+ EXTRA_DIST = Makefile.am.in scatter2.bin sine.bin using.bin gnuplot.cfg \
+@@ -404,7 +403,6 @@ gen-random.inc stat.inc GM1_sugar.pdb ar
+ icon64x64.png GM1_bonds.r3d blutux.rgb sound.par sound2.par start.par \
+ gnuplot.rot gnu-valley random-points gpdemos.tcl html 
  
 -@BUILD_PLUGIN_TRUE@PLUGIN_DIR = plugin
  all: all-recursive
  
  .SUFFIXES:
-Index: gnuplot-5.4.4/demo/Makefile.am
+Index: gnuplot/demo/Makefile.am
 ===================================================================
---- gnuplot-5.4.4.orig/demo/Makefile.am
-+++ gnuplot-5.4.4/demo/Makefile.am
-@@ -9,7 +9,6 @@ epslatex.ps epslatex.tex random.tmp stri
+--- gnuplot.orig/demo/Makefile.am
++++ gnuplot/demo/Makefile.am
+@@ -13,7 +13,6 @@ DISTCLEANFILES = Makefile.am Makefile.in
  BINARY_FILES = binary1 binary2 binary3
  
  SUBDIRS = $(PLUGIN_DIR)
@@ -37,18 +37,18 @@ Index: gnuplot-5.4.4/demo/Makefile.am
  
  DEMO = all.dem
  
-@@ -135,6 +134,3 @@ Makefile.am: Makefile.am.in
+@@ -155,6 +154,3 @@ Makefile.am: Makefile.am.in
+ 	echo endif >> $@t
  	chmod og-w $@t
  	mv $@t $@
- 
 -if BUILD_PLUGIN
 -PLUGIN_DIR = plugin
 -endif
-Index: gnuplot-5.4.4/demo/Makefile.am.in
+Index: gnuplot/demo/Makefile.am.in
 ===================================================================
---- gnuplot-5.4.4.orig/demo/Makefile.am.in
-+++ gnuplot-5.4.4/demo/Makefile.am.in
-@@ -9,7 +9,6 @@ epslatex.ps epslatex.tex random.tmp stri
+--- gnuplot.orig/demo/Makefile.am.in
++++ gnuplot/demo/Makefile.am.in
+@@ -13,7 +13,6 @@ DISTCLEANFILES = Makefile.am Makefile.in
  BINARY_FILES = binary1 binary2 binary3
  
  SUBDIRS = $(PLUGIN_DIR)

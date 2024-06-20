@@ -39,7 +39,7 @@
 #include "gadgets.h"
 #include "gp_time.h"
 #include "term_api.h"
-#include "variable.h"
+#include "gplocale.h"
 
 /* HBB 20000725: gather all per-axis variables into a struct, and set
  * up a single large array of such structs. Next step might be to use
@@ -103,6 +103,20 @@ const struct gen_table axisname_tbl[] =
     { NULL, -1}
 };
 
+/* If time axis tics are specified in units of minutes/hours/.../years
+ * we need to convert to seconds for tic generation
+ */
+const double approx_time_steps[] =
+{
+    1.0,	/* default to seconds */
+    1.0,	/* TIMELEVEL_SECONDS */
+    60.,	/* TIMELEVEL_MINUTES */
+    3600.,	/* TIMELEVEL_HOURS */
+    DAY_SEC,	/* TIMELEVEL_DAYS */
+    WEEK_SEC,	/* TIMELEVEL_WEEKS */
+    MON_SEC,	/* TIMELEVEL_MONTHS */
+    YEAR_SEC	/* TIMELEVEL_YEARS */
+};
 
 /* penalty for doing tics by callback in gen_tics is need for global
  * variables to communicate with the tic routines. Dont need to be
@@ -142,7 +156,7 @@ int grid_layer = LAYER_BEHIND;
 TBOOLEAN grid_tics_in_front = FALSE;
 TBOOLEAN grid_vertical_lines = FALSE;
 TBOOLEAN grid_spiderweb = FALSE;
-double polar_grid_angle = 0;	/* nonzero means a polar grid */
+double theta_grid_angle = 0;	/* nonzero means a polar grid */
 TBOOLEAN raxis = FALSE;
 double theta_origin = 0.0;	/* default origin at right side */
 double theta_direction = 1;	/* counterclockwise from origin */
@@ -176,6 +190,7 @@ static TBOOLEAN axis_position_zeroaxis(AXIS_INDEX);
 static void load_one_range(struct axis *axis, double *a, t_autoscale *autoscale, t_autoscale which );
 static double quantize_duodecimal_tics(double, int);
 static void get_position_type(enum position_type * type, AXIS_INDEX *axes);
+static void gen_time_minitics(struct axis *this, double start, double end, tic_callback callback);
 
 /* ---------------------- routines ----------------------- */
 
@@ -302,11 +317,8 @@ extend_parallel_axis(int paxis)
 }
 
 /*
- * Most of the crashes found during fuzz-testing of version 5.1 were a
+ * Most of the crashes found during fuzz-testing of version 5 were a
  * consequence of an axis range being corrupted, i.e. NaN or Inf.
- * Corruption became easier with the introduction of nonlinear axes,
- * but even apart from that autoscaling bad data could cause a fault.
- * NB: Some platforms may need help with isnan() and isinf().
  */
 TBOOLEAN
 bad_axis_range(struct axis *axis)
@@ -464,6 +476,7 @@ make_auto_time_minitics(t_timelevel tlevel, double incr)
     if ((int)tlevel < TIMELEVEL_SECONDS)
 	tlevel = TIMELEVEL_SECONDS;
     switch (tlevel) {
+    case TIMELEVEL_DEFAULT:
     case TIMELEVEL_SECONDS:
     case TIMELEVEL_MINUTES:
 	if (incr >= 5)
@@ -596,7 +609,6 @@ copy_or_invent_formatstring(struct axis *this_axis)
 	    double axmax = this_axis->max;
 	    int precision = ceil(-log10(GPMIN(fabs(axmax-axmin),fabs(axmin))));
 	    /* FIXME: Does horrible things for large value of precision */
-	    /* FIXME: Didn't I have a better patch for this? */
 	    if ((axmin*axmax > 0) && 4 < precision && precision < 10)
 		sprintf(tempfmt, "%%.%df", precision);
 	}
@@ -719,7 +731,6 @@ quantize_normal_tics(double arg, int guide)
 
 /* }}} */
 
-/* {{{ make_tics() */
 /* Implement TIC_COMPUTED case, i.e. automatically choose a usable
  * ticking interval for the given axis. For the meaning of the guide
  * parameter, see the comment on quantize_normal_tics() */
@@ -731,21 +742,24 @@ make_tics(struct axis *this_axis, int guide)
     xr = fabs(this_axis->min - this_axis->max);
     if (xr == 0)
 	return 1;	/* Anything will do, since we'll never use it */
-    if (xr >= VERYLARGE)
-	int_warn(NO_CARET,"%s axis range undefined or overflow",
-		axis_name(this_axis->index));
+    if (xr >= VERYLARGE) {
+	int_warn(NO_CARET, "%s axis range undefined or overflow, resetting to [0:0]",
+	    axis_name(this_axis->index));
+	/* This used to be int_error but there were false positives
+	 * (bad range on unused axis).  However letting +/-VERYLARGE through
+	 * can overrun data structures for time conversions. min = max avoids this.
+	 */
+	this_axis->min = this_axis->max = 0;
+    }
+
     tic = quantize_normal_tics(xr, guide);
-    /* FIXME HBB 20010831: disabling this might allow short log axis
-     * to receive better ticking... */
     if (this_axis->log && tic < 1.0)
 	tic = 1.0;
-
     if (this_axis->tictype == DT_TIMEDATE)
-	return quantize_time_tics(this_axis, tic, xr, guide);
-    else
-	return tic;
+	tic = quantize_time_tics(this_axis, tic, xr, guide);
+
+    return tic;
 }
-/* }}} */
 
 /* {{{ quantize_duodecimal_tics */
 /* HBB 20020220: New function, to be used to properly tic axes with a
@@ -867,9 +881,6 @@ round_outward(
 
     if (this_axis->tictype == DT_TIMEDATE) {
 	double ontime = time_tic_just(this_axis->timelevel, result);
-
-	/* FIXME: how certain is it that we don't want to *always*
-	 * return 'ontime'? */
 	if ((upwards && (ontime > result))
 	||  (!upwards && (ontime < result)))
 	    return ontime;
@@ -941,7 +952,12 @@ setup_tics(struct axis *this, int max)
      * We used to call quantize_time_tics, but that also caused strangeness.
      */
     if (this->tictype == DT_TIMEDATE && ticdef->type == TIC_SERIES) {
-	if      (tic >= 365*24*60*60.) this->timelevel = TIMELEVEL_YEARS;
+	if (this->tic_units != TIMELEVEL_DEFAULT) {
+		this->timelevel = this->tic_units;
+		this->ticstep = tic = 
+		    ticdef->def.series.incr * approx_time_steps[this->tic_units];
+	}
+	else if (tic >= 365*24*60*60.) this->timelevel = TIMELEVEL_YEARS;
 	else if (tic >=  28*24*60*60.) this->timelevel = TIMELEVEL_MONTHS;
 	else if (tic >=   7*24*60*60.) this->timelevel = TIMELEVEL_WEEKS;
 	else if (tic >=     24*60*60.) this->timelevel = TIMELEVEL_DAYS;
@@ -1039,7 +1055,7 @@ gen_tics(struct axis *this, tic_callback callback)
 		/* string constant that contains no format keys */
 		ticlabel = mark->label;
 	    } else if (this->index >= PARALLEL_AXES) {
-		/* FIXME: needed because axis->ticfmt is not maintained for parallel axes */
+		/* Needed because axis->ticfmt is not maintained for parallel axes */
 		gprintf(label, sizeof(label),
 			mark->label ? mark->label : this->formatstring,
 			log10_base, mark->position);
@@ -1081,7 +1097,7 @@ gen_tics(struct axis *this, tic_callback callback)
     /* series-tics, either TIC_COMPUTED ("autofreq") or TIC_SERIES (user-specified increment)
      *
      * We need to distinguish internal user coords from user coords.
-     * Now that we have nonlinear axes (as of version 5.2)
+     * Now that we have nonlinear axes
      *  	internal = primary axis, user = secondary axis
      *		TIC_COMPUTED ("autofreq") tries for equal spacing on primary axis
      *		TIC_SERIES   requests equal spacing on secondary (user) axis
@@ -1099,6 +1115,11 @@ gen_tics(struct axis *this, tic_callback callback)
 	double lmin = this->min, lmax = this->max;
 
 	reorder_if_necessary(lmin, lmax);
+
+	/* Clipping theta tics (ttics) based on theta range is undesireable */
+	if (this == &THETA_AXIS) {
+	    lmin = 0; lmax = 360;
+	}
 
 	/* {{{  choose start, step and end */
 	switch (def->type) {
@@ -1136,6 +1157,9 @@ gen_tics(struct axis *this, tic_callback callback)
 		start = def->def.series.start;
 		step = def->def.series.incr;
 		end = def->def.series.end;
+		/* time increment was given in minutes/hours/days/... */
+		if (this->tictype == DT_TIMEDATE && this->tic_units > 1)
+		    step = def->def.series.incr * approx_time_steps[this->tic_units];
 		if (start == -VERYLARGE)
 		    start = step * floor(lmin / step);
 		if (end == VERYLARGE)
@@ -1180,7 +1204,7 @@ gen_tics(struct axis *this, tic_callback callback)
 	reorder_if_necessary(start, end);
 	step = fabs(step);
 
-	if ((minitics != MINI_OFF) && (this->miniticscale != 0)) {
+	if (minitics != MINI_OFF) {
 	    FPRINTF((stderr,"axis.c: %d  start = %g end = %g step = %g base = %g\n",
 			__LINE__, start, end, step, this->base));
 
@@ -1201,13 +1225,18 @@ gen_tics(struct axis *this, tic_callback callback)
 		    miniend = step;
  		}
 	    } else if (nonlinear(this) && this->ticdef.logscaling) {
-		/* FIXME: Not sure this works for all values of step */
 		ministart = ministep = step / (this->base - 1);
 		miniend = step;
 	    } else if (this->tictype == DT_TIMEDATE) {
-		ministart = ministep =
-		    make_auto_time_minitics(this->timelevel, step);
-		miniend = step * 0.9;
+		/* CHANGE ver 5.5 (Jun 2021) */
+		if (minitics == MINI_DEFAULT) {
+		    minitics = MINI_OFF;
+		} else if (minitics != MINI_TIME) {
+		    /* This was the old (pre v5.5) default */
+		    ministart = ministep =
+			make_auto_time_minitics(this->timelevel, step);
+		    miniend = step * 0.9;
+		}
 	    } else if (minitics == MINI_AUTO) {
 		int k = fabs(step)/pow(10.,floor(log10(fabs(step))));
 
@@ -1373,7 +1402,11 @@ gen_tics(struct axis *this, tic_callback callback)
 		/* }}} */
 
 	    }
-	    if ((minitics != MINI_OFF) && (this->miniticscale != 0)) {
+	    if (minitics == MINI_TIME)
+		/* We will do time tics in a separate pass */
+		continue;
+
+	    if (minitics != MINI_OFF) {
 		/* {{{  process minitics */
 		double mplace, mtic_user, mtic_internal;
 
@@ -1416,10 +1449,89 @@ gen_tics(struct axis *this, tic_callback callback)
 		/* }}} */
 	    }
 	}
+
+	/* Handle minitics on a time axis as a special case.
+	 * Calculate exact position in time units (may not be evenly spaced)
+	 */
+	if (minitics == MINI_TIME)
+	    gen_time_minitics( this, start, end, callback );
+
     }
 }
-
 /* }}} */
+
+/* 
+ * Calculate exact position in time units (may not be evenly spaced)
+ */
+static void
+gen_time_minitics(struct axis *this, double start, double end, tic_callback callback)
+{
+    struct tm tm;
+    double mtic_user;
+    struct lp_style_type mgrd = mgrid_lp;
+
+    if (!(this->gridminor))
+	mgrd.l_type = LT_NODRAW;
+
+    /* Find zero-point minitic (we won't draw this one) */
+    ggmtime(&tm, start);
+    switch (this->minitic_units) {
+    case TIMELEVEL_YEARS:
+		tm.tm_mon = 0; tm.tm_mday = 1; tm.tm_hour = tm.tm_min = tm.tm_sec = 0;
+		break;
+    case TIMELEVEL_MONTHS:
+		tm.tm_mday = 1; tm.tm_hour = tm.tm_min = tm.tm_sec = 0;
+		break;
+    case TIMELEVEL_WEEKS:
+    case TIMELEVEL_DAYS:
+		tm.tm_hour = tm.tm_min = tm.tm_sec = 0;
+		break;
+    case TIMELEVEL_HOURS:
+		tm.tm_min = tm.tm_sec = 0;
+		break;
+    case TIMELEVEL_MINUTES:
+		tm.tm_sec = 0;
+		break;
+    case TIMELEVEL_SECONDS:
+		break;
+    default:
+		int_error(NO_CARET, "unsupported minor tic time unit");
+		break;
+    }
+
+    mtic_user = gtimegm(&tm);
+
+    do {
+	/* Increment by requested number of time units */
+	switch (this->minitic_units) {
+	case TIMELEVEL_YEARS:
+		    tm.tm_year += this->mtic_freq;
+		    break;
+	case TIMELEVEL_MONTHS:
+		    tm.tm_mon += this->mtic_freq;
+		    break;
+	case TIMELEVEL_WEEKS:
+		    tm.tm_mday += 7 * this->mtic_freq;
+		    break;
+	case TIMELEVEL_DAYS:
+		    tm.tm_mday += this->mtic_freq;
+		    break;
+	case TIMELEVEL_HOURS:
+		    tm.tm_hour += this->mtic_freq;
+		    break;
+	case TIMELEVEL_MINUTES:
+		    tm.tm_min += this->mtic_freq;
+		    break;
+	case TIMELEVEL_SECONDS:
+	case TIMELEVEL_DEFAULT:
+		    tm.tm_sec += this->mtic_freq;
+		    break;
+	}
+	mtic_user = gtimegm(&tm);
+	(*callback) (this, mtic_user, NULL, 1, mgrd, NULL);
+
+    } while (mtic_user < end);
+}
 
 /* {{{ time_tic_just() */
 /* justify ticplace to a proper date-time value */
@@ -1432,6 +1544,16 @@ time_tic_just(t_timelevel level, double ticplace)
 	return (ticplace);
     }
     ggmtime(&tm, ticplace);
+
+    /* Version 5.5 (June 2021)
+     * For timescales of days or longer mark each day
+     * at the start (0 AM) of that same day.
+     * It used to round to nearest date but left hours/min/sec non-zero (?!)
+     */
+    if (level >= TIMELEVEL_DAYS) { /* units of days */
+	tm.tm_hour = tm.tm_min = tm.tm_sec = 0;
+    }
+
     if (level >= TIMELEVEL_MINUTES) { /* units of minutes */
 	if (tm.tm_sec > 55)
 	    tm.tm_min++;
@@ -1442,15 +1564,6 @@ time_tic_just(t_timelevel level, double ticplace)
 	    tm.tm_hour++;
 	tm.tm_min = 0;
     }
-    if (level >= TIMELEVEL_DAYS) { /* units of days */
-	if (tm.tm_hour > 22) {
-	    tm.tm_hour = 0;
-	    tm.tm_mday = 0;
-	    tm.tm_yday++;
-	    ggmtime(&tm, gtimegm(&tm));
-	}
-    }
-    /* skip it, I have not bothered with weekday so far */
     if (level >= TIMELEVEL_MONTHS) {/* units of month */
 	if (tm.tm_mday > 25) {
 	    tm.tm_mon++;
@@ -1929,7 +2042,7 @@ some_grid_selected()
 	if (axis_array[i].gridmajor || axis_array[i].gridminor)
 	    return TRUE;
     /* Dec 2016 - CHANGE */
-    if (polar_grid_angle > 0)
+    if (theta_grid_angle > 0)
 	return TRUE;
     if (grid_spiderweb)
 	return TRUE;
@@ -2029,21 +2142,23 @@ get_position_type(enum position_type *type, AXIS_INDEX *axes)
 void
 get_position(struct position *pos)
 {
-    get_position_default(pos, first_axes, 3);
+    get_position_default(pos, first_axes, TRUE, 3);
 }
 
 /* get_position() - reads a position for label,arrow,key,...
  * with given default coordinate system
- * ndim = 2 only reads x,y
- * otherwise it reads x,y,z
+ * clear = TRUE  if 2nd or 3rd coordinate is missing, set it to zero
+ * ndim = 2 only reads x,y  otherwise it reads x,y,z
  */
 void
-get_position_default(struct position *pos, enum position_type default_type, int ndim)
+get_position_default(struct position *pos, enum position_type default_type,
+		TBOOLEAN clear, int ndim)
 {
     AXIS_INDEX axes;
     enum position_type type = default_type;
 
-    memset(pos, 0, sizeof(struct position));
+    if (clear)
+	memset(pos, 0, sizeof(struct position));
 
     get_position_type(&type, &axes);
     pos->scalex = type;
@@ -2054,7 +2169,7 @@ get_position_default(struct position *pos, enum position_type default_type, int 
 	get_position_type(&type, &axes);
 	pos->scaley = type;
 	GET_NUMBER_OR_TIME(pos->y, axes, FIRST_Y_AXIS);
-    } else {
+    } else if (clear) {
 	pos->y = 0;
 	pos->scaley = type;
     }
@@ -2070,7 +2185,7 @@ get_position_default(struct position *pos, enum position_type default_type, int 
 	}
 	pos->scalez = type;
 	GET_NUMBER_OR_TIME(pos->z, axes, FIRST_Z_AXIS);
-    } else {
+    } else if (clear) {
 	pos->z = 0;
 	pos->scalez = type;	/* same as y */
     }
@@ -2559,9 +2674,7 @@ extend_autoscaled_log_axis(AXIS *primary)
 }
 
 /*
- * gnuplot version 5.0 always maintained autoscaled range on x1
- * specifically, transforming from x2 coordinates if necessary.
- * In version 5.2 we track the x1 and x2 axis data limits separately.
+ * We track the x1 and x2 axis data limits separately.
  * However if x1 and x2 are linked to each other we must reconcile
  * their data limits before plotting.
  */
@@ -2637,7 +2750,26 @@ int
 map_y(double value)
 {
     double y = map_y_double(value);
-    if(isnan(y)) return intNaN;
+    if (isnan(y))
+	return intNaN;
+    return axis_map_toint(y);
+}
+
+/*
+ * This routine substitues for map_y() when drawing lines with
+ * option "sharpen".   It prevents extremely large values from
+ * being treated as UNDEFINED rather than OUTRANGE.
+ */
+int
+map_ysharp(double value)
+{
+    double y = map_y_double(value);
+    if (isnan(y))
+	return intNaN;
+    if (y >= (double)(INT_MAX))
+	return INT_MAX/2;
+    if (y <= (double)(-INT_MAX))
+	return -(INT_MAX/2);
 
     return axis_map_toint(y);
 }
@@ -2675,7 +2807,7 @@ polar_to_xy( double theta, double r, double *x, double *y, TBOOLEAN update)
 		if (R_AXIS.autoscale & AUTOSCALE_MAX)	{
 		    if ((R_AXIS.max_constraint & CONSTRAINT_UPPER)
 		    &&  (R_AXIS.max_ub < r))
-			    R_AXIS.max = R_AXIS.max_ub;
+			R_AXIS.max = R_AXIS.max_ub;
 		    else
 			R_AXIS.max = r;
 		} else {
@@ -2689,8 +2821,11 @@ polar_to_xy( double theta, double r, double *x, double *y, TBOOLEAN update)
 	AXIS *shadow = R_AXIS.linked_to_primary;
 	if (R_AXIS.log && r <= 0)
 	    r = not_a_number();
-	else
+	else {
 	    r = eval_link_function(shadow, r) - shadow->min;
+	    if (update && (R_AXIS.autoscale & AUTOSCALE_MAX) && (r > shadow->max))
+		shadow->max = r;
+	}
     } else if (inverted_raxis) {
 	r = R_AXIS.set_min - r;
     } else if ((R_AXIS.autoscale & AUTOSCALE_MIN)) {
@@ -2836,3 +2971,25 @@ autoscale_one_point(struct axis *axis, double x)
 	    axis->max = x;
     }
 }
+
+/*
+ * read one of the limiting values in a range of the form:
+ *    [min:max] [*:*] [*:max] [min:*]
+ * advance past following separator
+ */
+double
+parse_one_range_limit( double default_value )
+{
+    double limit = default_value;
+
+    if (equals(c_token, "*"))
+	c_token++;
+    else if (equals(c_token, ":") || equals(c_token, "]"))
+	;
+    else
+	limit = real_expression();
+    c_token++;
+
+    return limit;
+}
+	

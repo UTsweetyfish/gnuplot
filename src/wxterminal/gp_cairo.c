@@ -230,6 +230,11 @@ void gp_cairo_initialize_context(plot_struct *plot)
 			0.5, 0.5);
 	cairo_set_matrix(plot->cr, &matrix);
 
+	gp_cairo_set_lineprops(plot);
+}
+
+void gp_cairo_set_lineprops(plot_struct *plot)
+{
 	/* Default is square caps, mitered joins */
 	if (plot->linecap == ROUNDED) {
 	    cairo_set_line_cap  (plot->cr, CAIRO_LINE_CAP_ROUND);
@@ -243,7 +248,6 @@ void gp_cairo_initialize_context(plot_struct *plot)
 	    cairo_set_line_join (plot->cr, CAIRO_LINE_JOIN_MITER);
 	    cairo_set_miter_limit(plot->cr, 3.8);
 	}
-
 }
 
 
@@ -397,6 +401,9 @@ void gp_cairo_draw_polygon(plot_struct *plot, int n, gpiPoint *corners)
 	/* begin by stroking any open path */
 	gp_cairo_stroke(plot);
 
+	if (n <= 0)
+	    return;
+
 	if (plot->polygons_saturate) {
 		int i;
 		path_item *path;
@@ -459,14 +466,15 @@ void gp_cairo_end_polygon(plot_struct *plot)
 
 	/* if there's only one polygon, draw it directly */
 	if (path->previous == NULL) {
-		FPRINTF((stderr,"processing one polygon\n"));
-		cairo_move_to(plot->cr, path->corners[0].x, path->corners[0].y);
-		for (i=1;i<path->n;++i)
-			cairo_line_to(plot->cr, path->corners[i].x, path->corners[i].y);
-		cairo_close_path(plot->cr);
-		plot->color = path->color;
-		gp_cairo_fill( plot, path->corners->style & 0xf, path->corners->style >> 4 );
-		cairo_fill(plot->cr);
+		if (path->n > 0) {
+		    cairo_move_to(plot->cr, path->corners[0].x, path->corners[0].y);
+		    for (i = 1; i < path->n; i++)
+			    cairo_line_to(plot->cr, path->corners[i].x, path->corners[i].y);
+		    cairo_close_path(plot->cr);
+		    plot->color = path->color;
+		    gp_cairo_fill( plot, path->corners->style & 0xf, path->corners->style >> 4 );
+		    cairo_fill(plot->cr);
+		}
 		free(path->corners);
 		free(path);
 		plot->polygon_path_last = NULL;

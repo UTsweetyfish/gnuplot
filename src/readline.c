@@ -61,6 +61,9 @@
 #ifdef WGP_CONSOLE
 #include "win/winmain.h"
 #endif
+#ifdef __KLIBC__
+#include <sys/termio.h>
+#endif
 
 /*
  * adaptor routine for gnu libreadline
@@ -295,7 +298,7 @@ static int msdos_getch(void);
 #  ifdef DJGPP
 #   include <pc.h>
 #  endif			/* DJGPP */
-#  if defined(__EMX__) || defined (__WATCOMC__)
+#  ifdef __WATCOMC__
 #   include <conio.h>
 #  endif			/* __EMX__ */
 #  define special_getc() msdos_getch()
@@ -306,8 +309,11 @@ static int msdos_getch();
 #endif /* MSDOS or _WIN32 */
 
 #ifdef OS2
-# if defined( special_getc )
-#  undef special_getc()
+# ifdef __KLIBC__
+#  include <conio.h>
+# endif
+# if defined(special_getc)
+#  undef special_getc
 # endif				/* special_getc */
 # define special_getc() os2_getch()
 static int msdos_getch(void);
@@ -346,8 +352,6 @@ static void clear_line(const char *prompt);
 static void clear_eoline(const char *prompt);
 static void delete_previous_word(void);
 static void copy_line(char *line);
-static void set_termio(void);
-static void reset_termio(void);
 static int user_putc(int ch);
 static int user_puts(char *str);
 static int backspace(void);
@@ -826,7 +830,7 @@ readline(const char *prompt)
     int cur_char;
     char *new_line;
     TBOOLEAN next_verbatim = FALSE;
-    char *prev_line;
+    char *prev_line = NULL;
 
     /* start with a string of MAXBUF chars */
     if (line_len != 0) {
@@ -1143,7 +1147,10 @@ readline(const char *prompt)
 		switch_prompt(search_prompt, prompt);
 		if (search_result != NULL)
 		    copy_line(search_result->line);
-		free(prev_line);
+		if (prev_line != NULL) {
+		    free(prev_line);
+		    prev_line = NULL;
+		}
 		search_result_width = 0;
 		search_mode = FALSE;
 		break;
@@ -1159,8 +1166,13 @@ readline(const char *prompt)
 	    default:
 		/* abort, restore previous input line */
 		switch_prompt(search_prompt, prompt);
-		copy_line(prev_line);
-		free(prev_line);
+		if (prev_line != NULL) {
+		    copy_line(prev_line);
+		    free(prev_line);
+		    prev_line = NULL;
+		} else {
+		    copy_line("");
+		}
 		search_result_width = 0;
 		search_mode = FALSE;
 		break;
@@ -1475,6 +1487,11 @@ msdos_getch()
     int ch = getkey();
     c = (ch & 0xff00) ? 0 : ch & 0xff;
 #elif defined (OS2)
+# ifdef __KLIBC__
+    if (interactive)
+	c = getch();
+    else
+# endif
     c = getc(stdin);
 #else /* not OS2, not DJGPP*/
 # if defined (USE_MOUSE)
@@ -1489,6 +1506,11 @@ msdos_getch()
 #ifdef DJGPP
 	c = ch & 0xff;
 #elif defined(OS2)
+# ifdef __KLIBC__
+	if (interactive)
+	    c = getch();
+	else
+# endif
 	c = getc(stdin);
 #else /* not OS2, not DJGPP */
 # if defined (USE_MOUSE)
@@ -1562,7 +1584,7 @@ os2_getch() {
 
 
   /* set termio so we can do our own input processing */
-static void
+void
 set_termio()
 {
 #if !defined(MSDOS) && !defined(_WIN32)
@@ -1672,7 +1694,7 @@ set_termio()
 #endif /* not MSDOS && not _WIN32 */
 }
 
-static void
+void
 reset_termio()
 {
 #if !defined(MSDOS) && !defined(_WIN32)

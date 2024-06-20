@@ -1,8 +1,6 @@
-debian/build-x11/docs/gnuplot.dvi
 debian/build-x11/docs/gnuplot.pdf
-debian/build-x11/docs/gnuplot.ps
 debian/build-x11/docs/gnuplot.gih
-debian/build-x11/docs/htmldocs
+debian/build-x11/docs/html
 BUGS
 NEWS
 README

@@ -51,6 +51,10 @@
 # include "win/winmain.h"
 # include <io.h> /* _findfirst and _findnext set errno iff they return -1 */
 #endif
+#if defined(OS2) && !defined(__KLIBC__)
+# define INCL_DOSPROFILE
+# include <os2.h>
+#endif
 #ifdef NEED_CEXP
 # include <math.h>
 # include <complex.h>
@@ -174,12 +178,11 @@ strstr(const char *cs, const char *ct)
  * it doesn't really matter on these systems. lh
  */
 
-
 unsigned int
 sleep(unsigned int delay)
 {
 #if defined(MSDOS)
-# if !((defined(__EMX__) || defined(DJGPP))
+# if !defined(DJGPP)
     /* kludge to provide sleep() for msc 5.1 */
     unsigned long time_is_up;
 
@@ -195,6 +198,36 @@ sleep(unsigned int delay)
 }
 
 #endif /* HAVE_SLEEP */
+
+
+#if defined(OS2) && !defined(__KLIBC__)
+
+void usleep(unsigned long microseconds)
+{
+    if (microseconds >= 32000) {
+	/* The granularity of DosSleep is 32ms. */
+	_sleep2(microseconds / 1000);
+    } else {
+	/* For short wait times we just idle. */
+	ULONG ulTmrFreq; /* frequency of the counter */
+	unsigned long long qwTmrTimeStart; /* counter value */
+	unsigned long long qwTmrTimeStop;
+	ULONG ulDelta;
+	APIRET rc;
+	char overflow;
+
+	rc = DosTmrQueryFreq(&ulTmrFreq);
+	ulDelta = ulTmrFreq * (unsigned long long) microseconds / 1000000LL;
+	rc = DosTmrQueryTime((PQWORD)&qwTmrTimeStart);
+	overflow = (qwTmrTimeStart + ulDelta) < qwTmrTimeStart;
+	do {
+	    rc = DosTmrQueryTime((PQWORD)&qwTmrTimeStop);
+	} while (!((!overflow || (qwTmrTimeStop < qwTmrTimeStart))
+	          && (qwTmrTimeStop >= (qwTmrTimeStart + ulDelta))));
+    }
+}
+
+#endif
 
 
 /*
@@ -365,16 +398,14 @@ ms_snprintf(char *str, size_t size, const char * format, ...)
 
 
 /* Implement portable generation of a NaN value. */
-/* NB: Supposedly DJGPP V2.04 can use atof("NaN"), but... */
 
 double
 not_a_number(void)
 {
-#if defined (_MSC_VER) || defined (DJGPP) || defined(__DJGPP__) || defined(__MINGW32__)
-	unsigned long lnan[2]={0xffffffff, 0x7fffffff};
-    return *( double* )lnan;
+#ifdef NAN
+    return NAN; /* C99 define */
 #else
-	return atof("NaN");
+    return atof("NaN");
 #endif
 }
 
@@ -382,9 +413,9 @@ not_a_number(void)
 #ifdef NEED_CEXP
 double _Complex cexp(double _Complex z)
 {
-	double x = creal(z);
-	double y = cimag(z);
-	return exp(x) * (cos(y) + I*sin(y));
+    double x = creal(z);
+    double y = cimag(z);
+    return exp(x) * (cos(y) + I*sin(y));
 }
 #endif
 

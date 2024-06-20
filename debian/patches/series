@@ -6,3 +6,6 @@
 11_fix_linkage_wx.patch
 13_honour_SOURCE_DATE_EPOCH.patch
 20_fix_pdf-compilation.patch
+30_use_xelatex.patch
+40_fix-doc2tex-oob-read.patch
+no-webp_figures-in-documentation.patch

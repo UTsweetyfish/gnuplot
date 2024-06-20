@@ -42,6 +42,7 @@
 #include "graph3d.h"	/* for DGRID3D_* options */
 #include "getcolor.h"
 #include "voxelgrid.h"
+#include "multiplot.h"	/* for replay_multiplot() */
 
 /* gnuplot commands */
 
@@ -63,6 +64,7 @@ const struct gen_ftable command_ftbl[] =
     { "eval$uate", eval_command },
     { "ex$it", exit_command },
     { "f$it", fit_command },
+    { "function", functionblock_command },
     { "h$elp", help_command },
     { "?", help_command },
     { "hi$story", history_command },
@@ -70,6 +72,7 @@ const struct gen_ftable command_ftbl[] =
     { "import", import_command },
     { "else", else_command },
     { "l$oad", load_command },
+    { "local", local_command },
     { "pa$use", pause_command },
     { "p$lot", plot_command },
     { "pr$int", print_command },
@@ -77,13 +80,15 @@ const struct gen_ftable command_ftbl[] =
     { "pwd", pwd_command },
     { "q$uit", exit_command },
     { "ref$resh", refresh_command },
+    { "remulti$plot", replay_multiplot },
     { "rep$lot", replot_command },
-    { "re$read", reread_command },
+    { "reread", reread_command },
     { "res$et", reset_command },
+    { "return", return_command },
     { "sa$ve", save_command },
     { "scr$eendump", screendump_command },
     { "se$t", set_command },
-    { "she$ll", do_shell },
+    { "she$ll", shell_command },
     { "sh$ow", show_command },
     { "sp$lot", splot_command },
     { "st$ats", stats_command },
@@ -95,7 +100,9 @@ const struct gen_ftable command_ftbl[] =
     { "up$date", update_command },
     { "vclear", vclear_command },
     { "vfill", vfill_command },
+    { "vgfill", vfill_command },
     { "voxel", voxel_command },
+    { "warn", warn_command },
     { "while", while_command },
     { "{", begin_clause },
     { "}", end_clause },
@@ -132,6 +139,8 @@ const struct gen_table plot_smooth_tbl[] =
     { "mcs$plines", SMOOTH_MONOTONE_CSPLINE },
     { "fnor$mal", SMOOTH_FREQUENCY_NORMALISED },
     { "z$sort", SMOOTH_ZSORT },
+    { "path", SMOOTH_PATH },
+    { "convex$hull", SMOOTH_SMOOTH_HULL },	/* deprecated */
     { NULL, SMOOTH_NONE }
 };
 
@@ -151,6 +160,7 @@ const struct gen_table dgrid3d_mode_tbl[] =
 /* 'save' command */
 const struct gen_table save_tbl[] =
 {
+    { "data$blocks", SAVE_DATABLOCKS },
     { "fit", SAVE_FIT },
     { "fun$ctions", SAVE_FUNCS },
     { "set", SAVE_SET },
@@ -173,11 +183,14 @@ const struct gen_table set_tbl[] =
     { "bor$der", S_BORDER },
     { "boxdepth", S_BOXDEPTH },
     { "box$width", S_BOXWIDTH },
-    { "cl$abel", S_CLABEL },
-    { "c$lip", S_CLIP },
+    { "clabel", S_CLABEL },
+    { "clip", S_CLIP },
     { "cntrp$aram", S_CNTRPARAM },
     { "cntrl$abel", S_CNTRLABEL },
+    { "colormap$s", S_COLORMAP },
     { "cont$ours", S_CONTOUR },
+    { "contourfill", S_CONTOURFILL },
+    { "cornerp$oles", S_CORNERPOLES },
     { "dasht$ype", S_DASHTYPE },
     { "dt", S_DASHTYPE },
     { "da$ta", S_DATA },
@@ -191,17 +204,19 @@ const struct gen_table set_tbl[] =
     { "dec$imalsign", S_DECIMALSIGN },
     { "errorbars", S_BARS },
     { "fit", S_FIT },
-    { "font$path", S_FONTPATH },
+    { "fontpath", S_FONTPATH },
     { "fo$rmat", S_FORMAT },
     { "fu$nction", S_FUNCTIONS },
     { "fu$nctions", S_FUNCTIONS },
     { "g$rid", S_GRID },
+    { "help", S_HELP },
     { "hid$den3d", S_HIDDEN3D },
     { "historysize", S_HISTORYSIZE },	/* Deprecated */
     { "his$tory", S_HISTORY },
     { "pixmap$s", S_PIXMAP },
     { "isosurf$ace", S_ISOSURFACE },
-    { "is$osamples", S_ISOSAMPLES },
+    { "iso$samples", S_ISOSAMPLES },
+    { "isotropic", S_ISOTROPIC },
     { "jitter", S_JITTER },
     { "k$ey", S_KEY },
     { "keyt$itle", S_KEY },
@@ -367,6 +382,8 @@ const struct gen_table set_tbl[] =
     { "paxis", S_PAXIS },
 
     { "z$ero", S_ZERO },
+    { "watch$points", S_WATCH },
+    { "warn$ings", S_WARNINGS },
     { NULL, S_INVALID }
 };
 
@@ -394,6 +411,7 @@ const struct gen_table set_key_tbl[] =
     { "def$ault", S_KEY_DEFAULT },
     { "on", S_KEY_ON },
     { "off", S_KEY_OFF },
+    { "offset", S_KEY_OFFSET},
     { "t$op", S_KEY_TOP },
     { "b$ottom", S_KEY_BOTTOM },
     { "l$eft", S_KEY_LEFT },
@@ -427,6 +445,7 @@ const struct gen_table set_key_tbl[] =
     { "sp$acing", S_KEY_SPACING },
     { "w$idth", S_KEY_WIDTH },
     { "h$eight", S_KEY_HEIGHT },
+    { "keyw$idth", S_KEY_KEYWIDTH },
     { "a$utotitles", S_KEY_AUTOTITLES },
     { "noa$utotitles", S_KEY_NOAUTOTITLES },
     { "ti$tle", S_KEY_TITLE },
@@ -434,6 +453,8 @@ const struct gen_table set_key_tbl[] =
     { "font", S_KEY_FONT },
     { "tc", S_KEY_TEXTCOLOR },
     { "text$color", S_KEY_TEXTCOLOR },
+    { "col$s", S_KEY_COLS},
+    { "colu$mns", S_KEY_COLS},
     { "maxcol$s", S_KEY_MAXCOLS},
     { "maxcolu$mns", S_KEY_MAXCOLS},
     { "maxrow$s", S_KEY_MAXROWS},
@@ -458,6 +479,7 @@ const struct gen_table set_colorbox_tbl[] =
     { "def$ault",	S_COLORBOX_DEFAULT },
     { "u$ser",		S_COLORBOX_USER },
     { "at",		S_COLORBOX_USER },
+    { "bot$tom",	S_COLORBOX_BOTTOM },
     { "bo$rder",	S_COLORBOX_BORDER },
     { "bd$efault",	S_COLORBOX_BDEFAULT },
     { "nobo$rder",	S_COLORBOX_NOBORDER },
@@ -477,6 +499,7 @@ const struct gen_table set_palette_tbl[] =
     { "neg$ative",	S_PALETTE_NEGATIVE },
     { "gray$scale",	S_PALETTE_GRAY },
     { "grey$scale",	S_PALETTE_GRAY },
+    { "colormap",	S_PALETTE_COLORMAP },
     { "col$or",		S_PALETTE_COLOR },
     { "rgb$formulae",	S_PALETTE_RGBFORMULAE },
     { "def$ined",       S_PALETTE_DEFINED },
@@ -488,6 +511,7 @@ const struct gen_table set_palette_tbl[] =
     { "maxc$olors",	S_PALETTE_MAXCOLORS },
     { "gam$ma",         S_PALETTE_GAMMA },
     { "cubehelix",      S_PALETTE_CUBEHELIX },
+    { "viridis",        S_PALETTE_VIRIDIS },
     { NULL, S_PALETTE_INVALID }
 };
 
@@ -533,6 +557,7 @@ const struct gen_table set_pm3d_tbl[] =
     { "corners2c$olor",	S_PM3D_WHICH_CORNER },
     { "light$ing",	S_PM3D_LIGHTING_MODEL },
     { "nolight$ing",	S_PM3D_NOLIGHTING_MODEL },
+    { "spot$light",	S_PM3D_SPOTLIGHT },
     { NULL, S_PM3D_INVALID }
 };
 
@@ -629,7 +654,7 @@ struct gen_table default_color_names_tbl[] =
     { "sienna4"         , 128*(1<<16) +  64*(1<<8) +  20 },
     { "orchid4"         , 128*(1<<16) +  64*(1<<8) + 128 },
     { "mediumpurple3"   , 128*(1<<16) +  96*(1<<8) + 192 },
-    { "slateblue1"      , 128*(1<<16) +  96*(1<<8) + 255 },
+    { "slateblue"       , 128*(1<<16) +  96*(1<<8) + 255 },
     { "yellow4"         , 128*(1<<16) + 128*(1<<8) +   0 },
     { "sienna1"         , 255*(1<<16) + 128*(1<<8) +  64 },
     { "tan1"            , 255*(1<<16) + 160*(1<<8) +  64 },
@@ -689,6 +714,7 @@ const struct gen_table show_style_tbl[] =
     { "parallel$axis", SHOW_STYLE_PARALLEL },
     { "spider$plot", SHOW_STYLE_SPIDERPLOT },
     { "textbox", SHOW_STYLE_TEXTBOX },
+    { "watch$points", SHOW_STYLE_WATCHPOINT },
     { NULL, SHOW_STYLE_INVALID }
 };
 
@@ -730,12 +756,15 @@ const struct gen_table plotstyle_tbl[] =
     { "rgbima$ge", RGBIMAGE },
     { "rgba$lpha", RGBA_IMAGE },
     { "cir$cles", CIRCLES },
+    { "sec$tors", SECTORS },
     { "ell$ipses", ELLIPSES },
     { "sur$face", SURFACEGRID },
     { "parallel$axes", PARALLELPLOT },
     { "spider$plot", SPIDERPLOT },
     { "table", TABLESTYLE },
     { "zerror$fill", ZERRORFILL },
+    { "mask", POLYGONMASK },
+    { "contourfill", CONTOURFILL },
     { NULL, PLOT_STYLE_NONE }
 };
 
@@ -750,6 +779,7 @@ const struct gen_table filledcurves_opts_tbl[] =
     { "r", FILLEDCURVES_ATR },
     { "above", FILLEDCURVES_ABOVE },
     { "below", FILLEDCURVES_BELOW },
+    { "between", FILLEDCURVES_BETWEEN },
     { "y",  FILLEDCURVES_Y1 },
     { NULL, -1 }
 };
@@ -839,14 +869,38 @@ lookup_table_nth_reverse(
 }
 
 /* Returns the key associated with this indexed value
- * or NULL if the key/value pair is not found.
+ * or "" if the key/value pair is not found.
  */
 const char *
 reverse_table_lookup(const struct gen_table *tbl, int entry)
 {
+    static char *fail = "";
     int k = -1;
     while (tbl[++k].key)
 	if (tbl[k].value == entry)
 	    return(tbl[k].key);
-    return NULL;
+    return fail;
 }
+
+/* Returns the key associated with this indexed value
+ * or "" if the key/value pair is not found.
+ * The $ sign, if any, is removed first.
+ */
+char *
+clean_reverse_table_lookup(const struct gen_table *tbl, int entry)
+{
+    static char *match = NULL;
+    char *idollar;
+
+    free(match);
+    match = strdup(reverse_table_lookup(tbl, entry));
+    idollar = strchr(match, '$');
+    if (idollar) {
+	do {
+	    *idollar = *(idollar+1);
+	    idollar++;
+	} while (*idollar);
+    }
+    return match;
+}
+

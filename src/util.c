@@ -36,18 +36,16 @@
 #include "command.h"
 #include "datablock.h"
 #include "datafile.h"		/* for df_showdata and df_reset_after_error */
+#include "gplocale.h"
 #include "internal.h"		/* for eval_reset_after_error */
 #include "misc.h"
+#include "multiplot.h"		/* for multiplot_reset_after_error */
 #include "plot.h"
 #include "pm3d.h"		/* for pm3d_reset_after_error */
-#include "variable.h"		/* For locale handling */
 #include "setshow.h"		/* for conv_text() */
 #include "tabulate.h"		/* for table_mode */
 #include "voxelgrid.h"
 #include "encoding.h"
-#if defined(_MSC_VER) || defined(__WATCOMC__)
-# include <io.h>		/* for _access */
-#endif
 
 /* Exported (set-table) variables */
 
@@ -62,6 +60,7 @@ const char *micro = NULL;
 const char *minus_sign = NULL;
 TBOOLEAN use_micro = FALSE;
 TBOOLEAN use_minus_sign = FALSE;
+char *micro_user = NULL;
 
 /* Holds the name of the current LC_NUMERIC as set by "set decimal locale" */
 char *numeric_locale = NULL;
@@ -78,6 +77,7 @@ const char *current_prompt = NULL; /* to be set by read_line() */
 TBOOLEAN screen_ok;
 
 int debug = 0;
+TBOOLEAN suppress_warnings = FALSE;
 
 /* internal prototypes */
 
@@ -177,6 +177,10 @@ int
 type_udv(int t_num)
 {
     struct udvt_entry **udv_ptr = &first_udv;
+
+    /* End of command */
+    if (t_num >= num_tokens || equals(t_num,";"))
+	return 0;
 
     while (*udv_ptr) {
 	if (equals(t_num, (*udv_ptr)->udv_name)) {
@@ -359,6 +363,7 @@ m_quote_capture(char **str, int start, int end)
 
 /*
  * Wrapper for isstring + m_quote_capture or const_string_express
+ * Caveat: code may exit via int_error() if parsing fails in const_string_express()
  */
 char *
 try_to_get_string()
@@ -401,19 +406,6 @@ gp_strdup(const char *s)
     d = strdup(s);
 #endif
     return d;
-}
-
-/*
- * Allocate a new string and initialize it by concatenating two
- * existing strings.
- */
-char *
-gp_stradd(const char *a, const char *b)
-{
-    char *new = gp_alloc(strlen(a)+strlen(b)+1,"gp_stradd");
-    strcpy(new,a);
-    strcat(new,b);
-    return new;
 }
 
 /*{{{  mant_exp - split into mantissa and/or exponent */
@@ -872,7 +864,8 @@ gprintf_value(
 
 		    /* Replace u with micro character */
 		    if (use_micro && power == 6)
-			snprintf(dest, remaining_space, "%s%s", micro, &temp[2]);
+			snprintf(dest, remaining_space, "%s%s",
+				micro_user ? micro_user : micro, &temp[2]);
 
 		} else {
 		    /* please extend the range ! */
@@ -1049,7 +1042,7 @@ print_line_with_error(int t_num)
 	/* Print problem line from data file to the terminal */
 	df_showdata();
 
-    } else {
+    } else if (gp_input_line) {
 
 	/* If the current line was built by concatenation of lines inside */
 	/* a {bracketed clause}, try to reconstruct the true line number  */
@@ -1187,9 +1180,9 @@ common_error_exit()
     /* the normal cleanup code. Reset any flags before bailing.   */
     df_reset_after_error();
     eval_reset_after_error();
-    clause_reset_after_error();
     parse_reset_after_error();
     pm3d_reset_after_error();
+    multiplot_reset_after_error();
     set_iterator = cleanup_iteration(set_iterator);
     plot_iterator = cleanup_iteration(plot_iterator);
     scanning_range_in_progress = FALSE;
@@ -1217,22 +1210,26 @@ int_warn(int t_num, const char str[], va_dcl)
     va_list args;
 #endif
 
-    /* reprint line if screen has been written to */
-    print_line_with_error(t_num);
+    if (!suppress_warnings) {
 
-    fputs("warning: ", stderr);
+	/* reprint line if screen has been written to */
+	print_line_with_error(t_num);
+
+	fputs("warning: ", stderr);
 #ifdef VA_START
-    VA_START(args, str);
+	VA_START(args, str);
 # if defined(HAVE_VFPRINTF) || _LIBC
-    vfprintf(stderr, str, args);
+	vfprintf(stderr, str, args);
 # else
-    _doprnt(str, args, stderr);
+	_doprnt(str, args, stderr);
 # endif
-    va_end(args);
+	va_end(args);
 #else  /* VA_START */
-    fprintf(stderr, str, a1, a2, a3, a4, a5, a6, a7, a8);
+	fprintf(stderr, str, a1, a2, a3, a4, a5, a6, a7, a8);
 #endif /* VA_START */
-    putc('\n', stderr);
+	putc('\n', stderr);
+
+    }
 
 #if defined(_WIN32) || defined(__KLIBC__)
     /* Check asynchronously for Ctrl-C */
@@ -1248,6 +1245,21 @@ int_warn(int t_num, const char str[], va_dcl)
 
 /*}}} */
 
+/*
+ * user-triggered warning
+ * Syntax:
+ *	warn "some message"
+ */
+void
+warn_command()
+{
+    char *message;
+    c_token++;
+    if ((message = try_to_get_string())) {
+	int_warn(NO_CARET, message);
+	free(message);
+    }
+}
 
 /*
  * Reduce all multiple white-space chars to single spaces (if remain == 1)
@@ -1351,36 +1363,6 @@ parse_esc(char *instr)
     *t = NUL;
 }
 
-
-/* This function does nothing if dirent.h and windows.h not available. */
-TBOOLEAN
-existdir(const char *name)
-{
-#if defined(HAVE_DIRENT)
-    DIR *dp;
-    if ((dp = opendir(name)) == NULL)
-	return FALSE;
-
-    closedir(dp);
-    return TRUE;
-#else
-    int_warn(NO_CARET,
-	     "Test on directory existence not supported\n\t('%s!')",
-	     name);
-    return FALSE;
-#endif
-}
-
-
-TBOOLEAN
-existfile(const char *name)
-{
-#ifdef _MSC_VER
-    return (_access(name, 0) == 0);
-#else
-    return (access(name, F_OK) == 0);
-#endif
-}
 
 
 char *
@@ -1536,9 +1518,16 @@ value_to_str(struct value *val, TBOOLEAN need_quotes)
 	sprintf(s[j], "<%d line data block>", datablock_size(val));
 	break;
 	}
+    case FUNCTIONBLOCK:
+	{
+	sprintf(s[j], "<function block>");
+	break;
+	}
     case ARRAY:
 	{
 	sprintf(s[j], "<%d element array>", (int)(val->v.value_array->v.int_val));
+	if (val->v.value_array->type == COLORMAP_ARRAY)
+	    strcat(s[j], " (colormap)");
 	break;
 	}
     case VOXELGRID:
@@ -1603,3 +1592,26 @@ texify_title(char *str, int plot_type)
 
     return latex_title;
 }
+
+#ifdef USE_POLAR_GRID
+
+/* This is equivalent to inrange(z, zmin, zmax) except that it
+ * handles comparison of angles in degrees against a range of
+ * theta values [tmin:tmax] for which the range either spans 0
+ * (tmin < 0) or 360 (tmax > 360).
+ */
+TBOOLEAN
+in_theta_wedge( double t, double tmin, double tmax )
+{
+    if (tmax - tmin >= 360)
+	return TRUE;
+    if (tmin >=0 && tmax <= 360)
+	return (tmin <= t && t <= tmax);
+    if ((tmin < 0) && ((t < tmax) || (t > tmin+360)))
+	return TRUE;
+    if ((tmax > 360) && ((t > tmin) || (t < tmax-360)))
+	return TRUE;
+    return FALSE;
+}
+
+#endif /* USE_POLAR_GRID */

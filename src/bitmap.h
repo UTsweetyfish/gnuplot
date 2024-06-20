@@ -34,6 +34,8 @@
 # define GNUPLOT_BITMAP_H
 
 #include "syscfg.h"
+#include "color.h"
+#include "gadgets.h"	/* dashtype */
 
 /* allow up to 16 bit width for character array */
 typedef unsigned int char_row;
@@ -72,12 +74,13 @@ extern unsigned int b_planes;	/* number of color planes */
 extern unsigned int b_psize;	/* size of each plane */
 extern unsigned int b_rastermode; /* raster mode rotates -90deg */
 extern unsigned int b_linemask;	/* 16 bit mask for dotted lines */
-extern unsigned int b_angle;	/* rotation of text */
+extern          int b_angle;	/* rotation of text */
 extern int b_maskcount;
 
 
 /* Prototypes from file "bitmap.c" */
 
+void b_putpixel(unsigned int, unsigned int);
 unsigned int b_getpixel(unsigned int, unsigned int);
 void b_makebitmap(unsigned int, unsigned int, unsigned int);
 void b_freebitmap(void);
@@ -85,10 +88,14 @@ void b_charsize(unsigned int);
 void b_setvalue(unsigned int);
 
 void b_setlinetype(int);
+void b_dashtype(int type, t_dashtype *custom_dash_type);
+void b_linewidth(double linewidth);
 void b_move(unsigned int, unsigned int);
 void b_vector(unsigned int, unsigned int);
 void b_put_text(unsigned int, unsigned int, const char *);
-int b_text_angle(int);
+int b_text_angle(float);
+int b_justify_text(enum JUSTIFY mode);
 void b_boxfill(int, unsigned int, unsigned int, unsigned int, unsigned int);
+void b_filled_polygon(int points, gpiPoint *corners);
 
 #endif /* GNUPLOT_BITMAP_H */

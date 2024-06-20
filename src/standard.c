@@ -33,7 +33,6 @@
 #include "standard.h"
 
 #include "gadgets.h"		/* for 'ang2rad' and 'zero' */
-#include "gp_time.h"		/* needed by f_tmsec() and friendsa */
 #include "util.h"		/* for int_error() */
 
 static double carlson_elliptic_rc(double x,double y);
@@ -858,6 +857,15 @@ f_ellip_third(union argument *arg)
 
 }
 
+/* int(x) returns the integer portion of x, rounded towards zero.
+ * This is trunc(x) as defined in C99 except that we always return an int.
+ * If x > largest 64bit int we return NaN.
+ * Unlike floor, ceil, and round,  int(x) will return an int even if x
+ * is so large that the limited precision in the floating point representation
+ * means that several integers share that same representation.
+ * This turns out to be roughly the range 10^15 < x < 10^19.
+ * I.e. in that range |int(real(N)) - N| may be non-zero.
+ */
 void
 f_int(union argument *arg)
 {
@@ -868,12 +876,49 @@ f_int(union argument *arg)
     if (a.type == NOTDEFINED || isnan(foo)) {
 	push(Gcomplex(&a, not_a_number(), 0.0));
 	undefined = TRUE;
-    } else if (fabs(foo) > LARGEST_GUARANTEED_NONOVERFLOW) {
+    } else if (a.type == INTGR) {
+	push(&a);
+#ifdef GNUPLOT_INT64_SUPPORT
+    } else if (fabs(foo) >= LARGEST_GUARANTEED_NONOVERFLOW) {
 	if (overflow_handling == INT64_OVERFLOW_UNDEFINED)
 	    undefined = TRUE;
 	push(Gcomplex(&a, not_a_number(), 0.0));
+#else
+    } else if (fabs(foo) > LARGEST_GUARANTEED_NONOVERFLOW) {
+	push(Gcomplex(&a, not_a_number(), 0.0));
+#endif
     } else
-	push(Ginteger(&a, (intgr_t)foo));
+	push(Ginteger(&a, (intgr_t)trunc(foo)));
+}
+
+/* round(x) returns the integer nearest to the real part of x.
+ * This is a wrapper for llround(x) as defined in C99.
+ * If x is so large that round(x) would not necessarily be the nearest int
+ * due to limited precision, we return NaN rather than an incorrect integer.
+ */
+void
+f_round(union argument *arg)
+{
+    struct value a;
+    double foo = real(pop(&a));
+    (void) arg;			/* avoid -Wunused warning */
+
+    if (a.type == NOTDEFINED || isnan(foo)) {
+	push(Gcomplex(&a, not_a_number(), 0.0));
+	undefined = TRUE;
+    } else if (a.type == INTGR) {
+	push(&a);
+#ifdef GNUPLOT_INT64_SUPPORT
+    } else if (fabs(foo) >= LARGEST_EXACT_INT/2.) {
+	if (overflow_handling == INT64_OVERFLOW_UNDEFINED)
+	    undefined = TRUE;
+	push(Gcomplex(&a, not_a_number(), 0.0));
+#else
+    } else if (fabs(foo) >= LARGEST_GUARANTEED_NONOVERFLOW) {
+	push(Gcomplex(&a, not_a_number(), 0.0));
+#endif
+    } else
+	push(Ginteger(&a, (intgr_t)llround(foo)));
 }
 
 #define BAD_DEFAULT default: int_error(NO_CARET, "internal error : argument neither INT or CMPLX")
@@ -940,6 +985,31 @@ f_sqrt(union argument *arg)
 
 
 void
+f_cbrt(union argument *arg)
+{
+    struct value a;
+    double mag;
+
+    (void) arg;			/* avoid -Wunused warning */
+    (void) pop(&a);
+    if (imag(&a) == 0.0) {
+#if HAVE_CBRT
+	mag = cbrt(real(&a));
+#else
+	if (real(&a) >= 0.0)
+	    mag = pow(real(&a), 1.0/3.0);
+	else
+	    mag = -pow(-real(&a), 1.0/3.0);
+#endif
+	push(Gcomplex(&a, mag, 0.0));
+    } else {
+	undefined = TRUE;
+	push(Gcomplex(&a, not_a_number(), 0.0));
+    }
+}
+
+
+void
 f_exp(union argument *arg)
 {
     struct value a;
@@ -983,6 +1053,10 @@ f_log(union argument *arg)
 }
 
 
+/* This is a wrapper for C99 floor(x) except that we always return an int.
+ * If x is so large that floor(x) would not necessarily be the nearest int
+ * due to limited precision, we return NaN rather than an incorrect integer.
+ */
 void
 f_floor(union argument *arg)
 {
@@ -998,11 +1072,16 @@ f_floor(union argument *arg)
 	break;
     case CMPLX:
 	foo = a.v.cmplx_val.real;
+#ifdef GNUPLOT_INT64_SUPPORT
 	/* Note: this test catches NaN also */
-	if (!(fabs(foo) < LARGEST_GUARANTEED_NONOVERFLOW)) {
+	if (!(fabs(foo) < LARGEST_EXACT_INT/2.)) {
 	    if (overflow_handling == INT64_OVERFLOW_UNDEFINED)
 		undefined = TRUE;
 	    push(Gcomplex(&a, not_a_number(), 0.0));
+#else
+	if (fabs(foo) >= LARGEST_GUARANTEED_NONOVERFLOW) {
+	    push(Gcomplex(&a, not_a_number(), 0.0));
+#endif
 	} else {
 	    push(Ginteger(&a, (intgr_t) floor(foo)));
 	}
@@ -1012,6 +1091,10 @@ f_floor(union argument *arg)
 }
 
 
+/* This is a wrapper for C99 ceil(x) except that we always return an int.
+ * If x is so large that ceil(x) would not necessarily be the nearest int
+ * due to limited precision, we return NaN rather than an incorrect integer.
+ */
 void
 f_ceil(union argument *arg)
 {
@@ -1027,11 +1110,16 @@ f_ceil(union argument *arg)
 	break;
     case CMPLX:
 	foo = a.v.cmplx_val.real;
+#ifdef GNUPLOT_INT64_SUPPORT
 	/* Note: this test catches NaN also */
-	if (!(fabs(foo) < LARGEST_GUARANTEED_NONOVERFLOW)) {
+	if (!(fabs(foo) < LARGEST_EXACT_INT/2.)) {
 	    if (overflow_handling == INT64_OVERFLOW_UNDEFINED)
 		undefined = TRUE;
 	    push(Gcomplex(&a, not_a_number(), 0.0));
+#else
+	if (fabs(foo) >= LARGEST_GUARANTEED_NONOVERFLOW) {
+	    push(Gcomplex(&a, not_a_number(), 0.0));
+#endif
 	} else {
 	    push(Ginteger(&a, (intgr_t) ceil(foo)));
 	}
@@ -1055,9 +1143,9 @@ f_exists(union argument *arg)
     (void) pop(&a);
 
     if (a.type == STRING) {
-	struct udvt_entry *udv = add_udv_by_name(a.v.string_val);
+	struct udvt_entry *udv = get_udv_by_name(a.v.string_val);
 	gpfree_string(&a);
-	push(Ginteger(&a, udv->udv_value.type == NOTDEFINED ? 0 : 1));
+	push(Ginteger(&a, (udv && (udv->udv_value.type != NOTDEFINED))));
     } else {
 	push(Ginteger(&a, 0));
     }
@@ -1334,10 +1422,9 @@ ri1(double x)
 }
 
 
-/* FIXME HBB 20010726: should bessel functions really call int_error,
- * right in the middle of evaluating some mathematical expression?
- * Couldn't they just flag 'undefined', or ignore the real part of the
- * complex number? */
+/* Warn if the user passes an argument with non-zero imaginary component */
+static const char *bessel_error
+    = "For complex Bessel functions use BesselI, BesselJ, BesselY, BesselK";
 
 void
 f_besi0(union argument *arg)
@@ -1347,7 +1434,7 @@ f_besi0(union argument *arg)
     (void) arg;			/* avoid -Wunused warning */
     (void) pop(&a);
     if (fabs(imag(&a)) > zero)
-	int_error(NO_CARET, "can only do bessel functions of reals");
+	int_error(NO_CARET, bessel_error);
     push(Gcomplex(&a, ri0(real(&a)), 0.0));
 }
 
@@ -1359,7 +1446,7 @@ f_besi1(union argument *arg)
     (void) arg;			/* avoid -Wunused warning */
     (void) pop(&a);
     if (fabs(imag(&a)) > zero)
-	int_error(NO_CARET, "can only do bessel functions of reals");
+	int_error(NO_CARET, bessel_error);
     push(Gcomplex(&a, ri1(real(&a)), 0.0));
 }
 
@@ -1371,7 +1458,7 @@ f_besj0(union argument *arg)
     (void) arg;			/* avoid -Wunused warning */
     (void) pop(&a);
     if (fabs(imag(&a)) > zero)
-	int_error(NO_CARET, "can only do bessel functions of reals");
+	int_error(NO_CARET, bessel_error);
     push(Gcomplex(&a, rj0(real(&a)), 0.0));
 }
 
@@ -1384,7 +1471,7 @@ f_besj1(union argument *arg)
     (void) arg;			/* avoid -Wunused warning */
     (void) pop(&a);
     if (fabs(imag(&a)) > zero)
-	int_error(NO_CARET, "can only do bessel functions of reals");
+	int_error(NO_CARET, bessel_error);
     push(Gcomplex(&a, rj1(real(&a)), 0.0));
 }
 
@@ -1397,7 +1484,7 @@ f_besy0(union argument *arg)
     (void) arg;			/* avoid -Wunused warning */
     (void) pop(&a);
     if (fabs(imag(&a)) > zero)
-	int_error(NO_CARET, "can only do bessel functions of reals");
+	int_error(NO_CARET, bessel_error);
     if (real(&a) > 0.0)
 	push(Gcomplex(&a, ry0(real(&a)), 0.0));
     else {
@@ -1415,7 +1502,7 @@ f_besy1(union argument *arg)
     (void) arg;			/* avoid -Wunused warning */
     (void) pop(&a);
     if (fabs(imag(&a)) > zero)
-	int_error(NO_CARET, "can only do bessel functions of reals");
+	int_error(NO_CARET, bessel_error);
     if (real(&a) > 0.0)
 	push(Gcomplex(&a, ry1(real(&a)), 0.0));
     else {
@@ -1434,6 +1521,7 @@ f_besjn(union argument *arg)
     if ((n.type != INTGR) || (fabs(imag(&a)) > zero)) {
 	push(Gcomplex(&a, 0.0, 0.0));
 	undefined = TRUE;
+	int_error(NO_CARET, bessel_error);
     } else {
 	push(Gcomplex(&a, jn(n.v.int_val, real(&a)), 0.0));
     }
@@ -1449,92 +1537,10 @@ f_besyn(union argument *arg)
     if ((n.type != INTGR) || (fabs(imag(&a)) > zero)) {
 	push(Gcomplex(&a, 0.0, 0.0));
 	undefined = TRUE;
+	int_error(NO_CARET, bessel_error);
     } else {
 	push(Gcomplex(&a, yn(n.v.int_val, real(&a)), 0.0));
     }
-}
-
-
-/* functions for accessing fields from tm structure, for time series
- * they are all the same, so define a macro
- */
-#define TIMEFUNC(name, field)					\
-void								\
-name(union argument *arg)					\
-{								\
-    struct value a;						\
-    struct tm tm;						\
-								\
-    (void) arg;			/* avoid -Wunused warning */	\
-    (void) pop(&a);						\
-    ggmtime(&tm, real(&a));					\
-    push(Gcomplex(&a, (double)tm.field, 0.0));			\
-}
-
-TIMEFUNC( f_tmsec, tm_sec)
-TIMEFUNC( f_tmmin, tm_min)
-TIMEFUNC( f_tmhour, tm_hour)
-TIMEFUNC( f_tmmday, tm_mday)
-TIMEFUNC( f_tmmon, tm_mon)
-TIMEFUNC( f_tmyear, tm_year)
-TIMEFUNC( f_tmwday, tm_wday)
-TIMEFUNC( f_tmyday, tm_yday)
-
-void								
-f_tmweek(union argument *arg)					
-{								
-    struct value a;						
-    int week;
-    int standard;
-								
-    (void) arg;			/* avoid -Wunused warning */	
-    if ((pop(&a)->type != INTGR) || (a.v.int_val < 0) || (a.v.int_val > 1))
-	int_error(NO_CARET, "syntax: tm_week(time, standard)");
-    standard = a.v.int_val;
-    week = tmweek(real(pop(&a)), standard);
-    push(Ginteger(&a, week));
-}
-
-/*
- * time = weekdate_iso( year, week [, day] )
- */
-void
-f_weekdate_iso(union argument *arg)
-{
-    struct value a;
-    int nparams;
-    int year, week, day;
-
-    (void) arg;			/* avoid -Wunused warning */	
-    nparams = real(pop(&a));
-    if (nparams == 3)
-	day = real(pop(&a));
-    else
-	day = 1;
-    week = real(pop(&a));
-    year = real(pop(&a));
-    push(Gcomplex(&a, weekdate(year, week, day, 0), 0.0));
-}
-
-/*
- * time = weekdate_cdc( year, week [, day] )
- */
-void
-f_weekdate_cdc(union argument *arg)
-{
-    struct value a;
-    int nparams;
-    int year, week, day;
-
-    (void) arg;			/* avoid -Wunused warning */	
-    nparams = real(pop(&a));
-    if (nparams == 3)
-	day = real(pop(&a));
-    else
-	day = 1;
-    week = real(pop(&a));
-    year = real(pop(&a));
-    push(Gcomplex(&a, weekdate(year, week, day, 1), 0.0));
 }
 
 

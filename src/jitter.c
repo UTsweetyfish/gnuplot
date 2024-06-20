@@ -105,10 +105,10 @@ void
 jitter_points(struct curve_points *plot)
 {
     int i, j;
-
-    /* The "x" and "xscale" stored in jitter are really along y */
     double xjit, ygap;
     struct position yoverlap;
+
+    /* The "x" and "xscale" stored in jitter are really along y */
     yoverlap.x = 0;
     yoverlap.y = jitter.overlap.x;
     yoverlap.scaley = jitter.overlap.scalex;
@@ -182,7 +182,7 @@ set_jitter()
     while (!END_OF_COMMAND) {
 	if (almost_equals(c_token, "over$lap")) {
 	    c_token++;
-	    get_position_default(&jitter.overlap, character, 2);
+	    get_position_default(&jitter.overlap, character, TRUE, 2);
 	} else if (equals(c_token, "spread")) {
 	    c_token++;
 	    jitter.spread = real_expression();

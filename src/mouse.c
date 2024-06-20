@@ -43,7 +43,6 @@
 #include "stdfn.h"
 #include "gp_types.h"
 
-#define _MOUSE_C		/* FIXME HBB 20010207: violates Codestyle */
 #ifdef USE_MOUSE		/* comment out whole file, otherwise... */
 
 #include "eval.h"		/* for mouse_readout_function */
@@ -62,7 +61,12 @@
 #include "term_api.h"
 #include "util3d.h"
 #include "hidden3d.h"
+#include "multiplot.h"	/* EXPERIMENTAL */
 #include "plot.h"	/* for interactive */
+
+#ifdef USE_WATCHPOINTS
+# include "watch.h"
+#endif
 
 #ifdef _WIN32
 # include "win/winmain.h"
@@ -77,8 +81,87 @@
 char mouse_fmt_default[] = "% #g";
 udft_entry mouse_readout_function = {NULL, "mouse_readout_function", NULL, NULL, 2 /*dummy_values[]*/};
 
+long mouse_mode = MOUSE_COORDINATES_REAL;
+char* mouse_alt_string = (char*) 0;
 mouse_setting_t default_mouse_setting = DEFAULT_MOUSE_SETTING;
 mouse_setting_t         mouse_setting = DEFAULT_MOUSE_SETTING;
+
+/* the following table must match exactly the
+ * enum's of GP_ in mousecmn.h and end with a NULL pointer!
+ */
+static char* special_keys[] = {
+    "GP_FIRST_KEY", /* keep this dummy there */
+    "Linefeed",
+    "Clear",
+    "Pause",
+    "Scroll_Lock",
+    "Sys_Req",
+    "Insert",
+    "Home",
+    "Left",
+    "Up",
+    "Right",
+    "Down",
+    "PageUp",
+    "PageDown",
+    "End",
+    "Begin",
+    "KP_Space",
+    "KP_Tab",
+    "KP_F1",
+    "KP_F2",
+    "KP_F3",
+    "KP_F4",
+
+    /* see KP_0 - KP_9 */
+    "KP_Insert",
+    "KP_End",
+    "KP_Down",
+    "KP_PageDown",
+    "KP_Left",
+    "KP_Begin",
+    "KP_Right",
+    "KP_Home",
+    "KP_Up",
+    "KP_PageUp",
+
+    "KP_Delete",
+    "KP_Equal",
+    "KP_Multiply",
+    "KP_Add",
+    "KP_Separator",
+    "KP_Subtract",
+    "KP_Decimal",
+    "KP_Divide",
+    "KP_0",
+    "KP_1",
+    "KP_2",
+    "KP_3",
+    "KP_4",
+    "KP_5",
+    "KP_6",
+    "KP_7",
+    "KP_8",
+    "KP_9",
+    "F1",
+    "F2",
+    "F3",
+    "F4",
+    "F5",
+    "F6",
+    "F7",
+    "F8",
+    "F9",
+    "F10",
+    "F11",
+    "F12",
+    "Close",
+    "Button1",
+    "Button2",
+    "Button3",
+    "GP_LAST_KEY",
+    (char*) 0 /* must be the last line */
+};
 
 /* "usual well-known" keycodes, i.e. those not listed in special_keys in mouse.h
 */
@@ -163,6 +246,20 @@ static bind_t *bindings = (bind_t *) 0;
 static const int NO_KEY = -1;
 static TBOOLEAN trap_release = FALSE;
 
+/*
+ * event -> name translation for debugging
+ */
+const char* GE_evt_name(int type)
+{
+#define GE_EVT_NAME(name) case name: return #name;
+    switch(type)
+    {
+        GE_EVT_LIST(GE_EVT_NAME);
+    default: ;
+    }
+    return "GE_UNKNOWN";
+}
+
 /* forward declarations */
 static void alert(void);
 static void MousePosToGraphPosReal(int xx, int yy, double *x, double *y, double *x2, double *y2);
@@ -190,6 +287,8 @@ static void event_motion(struct gp_event_t * ge);
 static void event_modifier(struct gp_event_t * ge);
 static void do_save_3dplot(struct surface_points *, int, REPLOT_TYPE);
 static void load_mouse_variables(double, double, TBOOLEAN, int);
+static TBOOLEAN mouse_is_outside_plot(void);
+static TBOOLEAN mouse_outside_active_region(void);
 
 static void do_zoom_in_around_mouse(void);
 static void do_zoom_out_around_mouse(void);
@@ -665,8 +764,8 @@ apply_zoom(struct t_zoom *z)
 	zoom_now->y2max = axis_array[SECOND_Y_AXIS].set_max;
     }
 
-    /* EAM DEBUG - The autoscale save/restore was too complicated, and
-     * broke refresh. Just save the complete axis state and have done with it.
+    /* The autoscale save/restore was too complicated, and broke refresh.
+     * Just save the complete axis state and have done with it.
      */
     if (zoom_now == zoom_head && z != zoom_head) {
 	axis_array_copy = gp_realloc( axis_array_copy, sizeof(axis_array), "axis_array copy");
@@ -859,6 +958,12 @@ incr_mousemode(const int amount)
 void
 UpdateStatusline()
 {
+    if (last_plot_was_multiplot && mouse_outside_active_region()) {
+	if (term->put_tmptext)
+	    (term->put_tmptext) (0, "mouse not in active plot");
+	return;
+    }
+
     UpdateStatuslineWithMouseSetting(&mouse_setting);
 }
 
@@ -1564,7 +1669,8 @@ ChangeAzimuth(int x)
 }
 
 
-int is_mouse_outside_plot(void)
+static TBOOLEAN
+mouse_is_outside_plot(void)
 {
 #define CHECK_AXIS_OUTSIDE(real, axis)        \
     ( axis_array[axis].min <  VERYLARGE &&    \
@@ -1581,6 +1687,16 @@ int is_mouse_outside_plot(void)
         CHECK_AXIS_OUTSIDE(real_y2, SECOND_Y_AXIS);
 
 #undef CHECK_AXIS_OUTSIDE
+}
+
+static TBOOLEAN
+mouse_outside_active_region(void)
+{
+    if (mouse_x < active_bounds.xleft || mouse_x > active_bounds.xright
+    ||  mouse_y < active_bounds.ybot || mouse_y > active_bounds.ytop)
+	return TRUE;
+
+    return FALSE;
 }
 
 /* Return a new upper or lower axis limit that is a linear
@@ -1725,7 +1841,7 @@ static void
 zoom_in_X(int zoom_key)
 {
     retain_offsets = TRUE;
-    if (is_mouse_outside_plot()) {
+    if (mouse_is_outside_plot()) {
 	/* zoom in (X axis only) */
 	double w1 = (zoom_key=='+') ? 23./25. : 23./21.;
 	double w2 = (zoom_key=='+') ?  2./25. : -2./21.;
@@ -1766,8 +1882,10 @@ static void
 zoom_around_mouse(int zoom_key)
 {
     double xmin, ymin, x2min, y2min, xmax, ymax, x2max, y2max;
+    double orig_x = real_x;
+    TBOOLEAN adjust = FALSE;
 
-    if (is_mouse_outside_plot()) {
+    if (mouse_is_outside_plot()) {
 	/* zoom in (factor of approximately 2^(.25), so four steps gives 2x larger) */
 	double w1 = (zoom_key=='+') ? 23./25. : 23./21.;
 	double w2 = (zoom_key=='+') ?  2./25. : -2./21.;
@@ -1789,11 +1907,27 @@ zoom_around_mouse(int zoom_key)
 	rescale_around_mouse(&ymin,  &ymax,  FIRST_Y_AXIS,  real_y,  yscale);
 	rescale_around_mouse(&x2min, &x2max, SECOND_X_AXIS, real_x2, xscale);
 	rescale_around_mouse(&y2min, &y2max, SECOND_Y_AXIS, real_y2, yscale);
+	adjust = TRUE;
     }
     retain_offsets = TRUE;
     do_zoom(xmin, ymin, x2min, y2min, xmax, ymax, x2max, y2max);
     if (display_ipc_commands())
 	fprintf(stderr, "zoom %s.\n", (zoom_key=='+' ? "in" : "out"));
+
+    /* If rescaling causes the y axis tic labels to gain or lose a decimal point,
+     * the position of the left border jumps and the nominal x coordinate of the
+     * current mouse position jumps with it. Try to detect and correct for the
+     * simplest (linear) case of this.  See Bug #1375.
+     */
+    if (adjust && !nonlinear(&axis_array[FIRST_X_AXIS])) {
+	double delta;
+	MousePosToGraphPosReal(mouse_x, mouse_y, &real_x, &real_y, &real_x2, &real_y2);
+	delta = real_x - orig_x;
+	if (fabs(delta / orig_x) > 1.e-7) {
+	    do_zoom(xmin-delta, ymin, x2min, y2min, xmax-delta, ymax, x2max, y2max);
+	    FPRINTF((stderr, "zoom adjust by %g \n", delta));
+	}
+    }
 }
 
 static void
@@ -1962,10 +2096,12 @@ event_buttonpress(struct gp_event_t *ge)
 	if (!setting_zoom_region) {
 	    if (3 == b &&
 	    	(!replot_disabled || (E_REFRESH_NOT_OK != refresh_ok))	/* Use refresh if available */
-		&& !(paused_for_mouse & PAUSE_BUTTON3)) {
+		&& !(paused_for_mouse & PAUSE_BUTTON3)
+		&& !(last_plot_was_multiplot && mouse_outside_active_region())) {
 		/* start zoom; but ignore it when
 		 *   - replot is disabled, e.g. with inline data, or
 		 *   - during 'pause mouse'
+		 *   - outside the active region of a multiplot
 		 * allow zooming during 'pause mouse key' */
 		setting_zoom_x = mouse_x;
 		setting_zoom_y = mouse_y;
@@ -2125,11 +2261,13 @@ event_buttonrelease(struct gp_event_t *ge)
 	}
 
 	if (b == 2) {
+	    if (last_plot_was_multiplot && mouse_outside_active_region())
+		; /* nothing to do */
+	    else
+
 	    /* draw temporary annotation or label. For 3d plots this is
 	     * only done if the user didn't drag (scale) the plot */
-
 	    if (!is_3d_plot || !motion) {
-
 		GetAnnotateString(s0, real_x, real_y, mouse_mode, mouse_alt_string);
 		if (mouse_setting.label) {
 		    if (modifier_mask & Mod_Ctrl) {
@@ -2236,10 +2374,12 @@ event_motion(struct gp_event_t *ge)
 	    start_y = mouse_y;
 	    redraw = TRUE;
 	} else if (button & (1 << 3)) {
-	    /* dragging with button 3 -> change azimuth */
-	    ChangeAzimuth( (mouse_x - start_x) * 90.0 / term->xmax );
-	    start_x = mouse_x;
-	    redraw = TRUE;
+	    if (!(last_plot_was_multiplot && mouse_outside_active_region())) {
+		/* dragging with button 3 -> change azimuth */
+		ChangeAzimuth( (mouse_x - start_x) * 90.0 / term->xmax );
+		start_x = mouse_x;
+		redraw = TRUE;
+	    }
 	}
 
 	if (!ALMOST2D) {
@@ -2282,6 +2422,14 @@ event_motion(struct gp_event_t *ge)
 	    sprintf(s, zoombox_format(), real_x, real_y);
 	    term->put_tmptext(2, s);
 	}
+#ifdef USE_WATCHPOINTS
+	else if (watch_mouse_active) {
+	    /* Trigger a redraw so that the watch points can be rechecked against
+	     * new mouse position. Should we replot immediately, or queue an event?
+	     */
+	    do_string_replot("");
+	}
+#endif
     }
 }
 
@@ -2365,7 +2513,7 @@ do_event(struct gp_event_t *ge)
     replot_disabled = plotted_data_from_stdin;
 
     if (ge->type) {
-	FPRINTF((stderr, "(do_event) type       = %d\n", ge->type));
+	FPRINTF((stderr, "(do_event) type       = %s\n", GE_evt_name(ge->type)));
 	FPRINTF((stderr, "           mx, my     = %d, %d\n", ge->mx, ge->my));
 	FPRINTF((stderr, "           par1, par2 = %d, %d\n", ge->par1, ge->par2));
     }
@@ -2418,8 +2566,9 @@ do_event(struct gp_event_t *ge)
 	break;
     case GE_fontprops:
 #ifdef X11
-	/* EAM FIXME:  Despite the name, only X11 uses this to pass font info.	*/
-	/* Everyone else passes just the plot height and width.			*/
+	/* Despite the name, only X11 uses this to pass font info.
+	 * Everyone else passes just the plot height and width.
+	 */
 	if (!strcmp(term->name,"x11")) {
 	    /* These are declared in ../term/x11.trm */
 	    extern int          X11_hchar_saved, X11_vchar_saved;
@@ -2509,6 +2658,12 @@ exec_event(char type, int mx, int my, int par1, int par2, int winid)
 static void
 do_save_3dplot(struct surface_points *plots, int pcount, REPLOT_TYPE quick)
 {
+
+    /* EXPERIMENTAL 3D mousing from inside a multiplot */
+    if (last_plot_was_multiplot && refresh_ok == E_REFRESH_OK_3D) {
+	replay_multiplot();
+    } else
+
     if (!plots || (E_REFRESH_NOT_OK == refresh_ok)) {
 	/* !plots might happen after the `reset' command for example
 	 * (reported by Franz Bakan).
@@ -3136,6 +3291,16 @@ load_mouse_variables(double x, double y, TBOOLEAN button, int c)
 	Ginteger(&current->udv_value, modifier_mask & Mod_Ctrl);
     }
     return;
+}
+
+/* Mechanism for core code to query the last-known mouse coordinates.
+ * When called in the context of a plot, the coordinates are returned
+ * using the axes (x1/x2 y1/y2) of that plot.
+ */
+void get_last_mouse_xy( double *x, double *y )
+{
+    *x = (x_axis == SECOND_X_AXIS) ? real_x2 : real_x;
+    *y = (y_axis == SECOND_Y_AXIS) ? real_y2 : real_y;
 }
 
 #endif /* USE_MOUSE */

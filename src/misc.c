@@ -37,11 +37,11 @@
 #include "datablock.h"
 #include "encoding.h"
 #include "graphics.h"
+#include "loadpath.h"
+#include "multiplot.h"
 #include "plot.h"
 #include "tables.h"
 #include "util.h"
-#include "variable.h"
-#include "axis.h"
 #include "scanner.h"		/* so that scanner() can count curly braces */
 #include "setshow.h"
 #ifdef _WIN32
@@ -51,7 +51,8 @@
 # endif
 #endif
 
-static void prepare_call(int calltype);
+static void prepare_call(int calltype, udvt_entry *functionblock);
+static void lf_exit_scope(int depth);
 
 /* State information for load_file(), to recover from errors
  * and properly handle recursive load_file calls
@@ -70,7 +71,7 @@ static char *failed_file_name = NULL;
 char *loadpath_fontname = NULL;
 
 static void
-prepare_call(int calltype)
+prepare_call(int calltype, udvt_entry *functionblock)
 {
     struct udvt_entry *udv;
     struct value *ARGV;
@@ -85,7 +86,7 @@ prepare_call(int calltype)
     for (argindex = 0; argindex < 9; argindex++)
 	argval[argindex].type = NOTDEFINED;
 
-    if (calltype == 2) {
+    if (calltype == 2 || calltype == 7) {
 	call_argc = 0;
 	while (!END_OF_COMMAND && call_argc < 9) {
 	    call_args[call_argc] = try_to_get_string();
@@ -147,6 +148,43 @@ prepare_call(int calltype)
 	    lf_head->call_args[argindex] = NULL;	/* just to be safe */
 	}
 
+#ifdef USE_FUNCTIONBLOCKS
+    } else if (calltype == 8) {
+	/* $functionblock(arg1, ...) */
+	cache_at(&lf_head->shadow_at, &lf_head->shadow_at_size);
+	memcpy(argval, eval_parameters, sizeof(argval));
+	call_argc = 0;
+	while ((call_argc < 9) && (argval[call_argc].type != NOTDEFINED)) {
+	    /* Execute the equivalent of local paramN = ARGV[N] */
+	    if (functionblock->udv_value.v.functionblock.parnames) {
+		char *name = functionblock->udv_value.v.functionblock.parnames[call_argc];
+		if (name) {
+		    struct udvt_entry *udv = add_udv_by_name(name);
+		    shadow_one_variable(udv);
+		    udv->udv_value = eval_parameters[call_argc];
+		    if (udv->udv_value.type == STRING)
+			udv->udv_value.v.string_val = strdup(udv->udv_value.v.string_val);
+		    if (udv->udv_value.type == ARRAY) {
+			/* local arrays are freed only by lf_exit_scope() */
+			make_array_permanent(&(udv->udv_value));
+			udv->udv_value.v.value_array[0].type = LOCAL_ARRAY;
+		    }
+		    lf_head->local_variables = TRUE;
+		}
+	    }
+	    call_argc++;
+	}
+	if ((call_argc < 9)
+	&&  (functionblock->udv_value.v.functionblock.parnames != NULL)
+	&&  (functionblock->udv_value.v.functionblock.parnames[call_argc] != NULL))
+	    int_warn(c_token-1, "Not enough parameters for %s", lf_head->name);
+	if (evaluate_inside_functionblock == 0) {
+	    evaluate_inside_functionblock = lf_head->depth + 1;
+	    FPRINTF((stderr, "setting flag evaluate_inside_functionblock to %d\n",
+		    lf_head->depth + 1));
+	}
+#endif
+
     } else {
 	/* "load" command has no arguments */
 	call_argc = 0;
@@ -159,18 +197,22 @@ prepare_call(int calltype)
     udv = add_udv_by_name("ARGC");
     Ginteger(&(udv->udv_value), call_argc);
 
+    udv = add_udv_by_name("ARGV");
+    argv_size = GPMIN(call_argc, 9);
+    init_array(udv, argv_size);
+    ARGV = udv->udv_value.v.value_array;
+
+#ifdef USE_FUNCTIONBLOCKS
+    if (calltype == 8) {
+	for (argindex = 1; argindex <= argv_size; argindex++)
+	    ARGV[argindex] = argval[argindex-1];
+	return;
+    }
+#endif
+
     udv = add_udv_by_name("ARG0");
     gpfree_string(&(udv->udv_value));
     Gstring(&(udv->udv_value), gp_strdup(lf_head->name));
-
-    udv = add_udv_by_name("ARGV");
-    free_value(&(udv->udv_value));
-
-    argv_size = GPMIN(call_argc, 9);
-    udv->udv_value.type = ARRAY;
-    ARGV = udv->udv_value.v.value_array = gp_alloc((argv_size + 1) * sizeof(t_value), "array state");
-    ARGV[0].v.int_val = argv_size;
-    ARGV[0].type = NOTDEFINED;
 
     for (argindex = 1; argindex <= 9; argindex++) {
 	char *argstring = call_args[argindex-1];
@@ -195,7 +237,9 @@ prepare_call(int calltype)
  * (3) on program entry to load initialization files (acts like "load")
  * (4) to execute script files given on the command line (acts like "load")
  * (5) to execute a single script file given with -c (acts like "call")
- * (6) "load $datablock" (EXPERIMENTAL)
+ * (6) "load $datablock"
+ * (7) "call $datablock"
+ * (8) execute commands in function block (called from f_eval)
  */
 void
 load_file(FILE *fp, char *name, int calltype)
@@ -207,10 +251,20 @@ load_file(FILE *fp, char *name, int calltype)
     int stop = FALSE;
     udvt_entry *gpval_lineno = NULL;
     char **datablock_input_line = NULL;
+    udvt_entry *functionblock = NULL;
 
     /* Support for "load $datablock" */
-    if (calltype == 6)
+    if (calltype == 6 || calltype == 7)
 	datablock_input_line = get_datablock(name);
+
+#ifdef USE_FUNCTIONBLOCKS
+    /* Support for function blocks */
+    if (calltype == 8) {
+	functionblock = (udvt_entry *)(name);
+	datablock_input_line = functionblock->udv_value.v.functionblock.data_array;
+	name = strdup(functionblock->udv_name);
+    }
+#endif
 
     if (!fp && !datablock_input_line) {
 	failed_file_name = name;
@@ -232,12 +286,12 @@ load_file(FILE *fp, char *name, int calltype)
     }
 
     /* We actually will read from a file */
-    prepare_call(calltype);
+    prepare_call(calltype, functionblock);
 
     /* things to do after lf_push */
     inline_num = 0;
     /* go into non-interactive mode during load */
-    /* will be undone below, or in load_file_error */
+    /* will be undone below, or in reset_load_stack_after_error */
     interactive = FALSE;
 
     while (!stop) {	/* read all lines in file */
@@ -340,6 +394,10 @@ load_file(FILE *fp, char *name, int calltype)
 	    if (do_line())
 		stop = TRUE;
 	}
+
+	/* If this line is part of a multiplot, save it for later replay */
+	if (multiplot && !multiplot_playback & !evaluate_inside_functionblock)
+	    append_multiplot_line(gp_input_line);
     }
 
     /* pop state */
@@ -348,7 +406,8 @@ load_file(FILE *fp, char *name, int calltype)
 
 /* pop from load_file state stack
    FALSE if stack was empty
-   called by load_file and load_file_error */
+   called by load_file and reset_load_stack_after_error
+ */
 TBOOLEAN
 lf_pop()
 {
@@ -404,9 +463,8 @@ lf_pop()
 	    struct value *ARGV;
 	    int argv_size = lf->argv[0].v.int_val;
 
-	    gpfree_array(&(udv->udv_value));
-	    udv->udv_value.type = ARRAY;
-	    ARGV = udv->udv_value.v.value_array = gp_alloc((argv_size + 1) * sizeof(t_value), "array state");
+	    init_array(udv, argv_size);
+	    ARGV = udv->udv_value.v.value_array;
 	    for (argindex = 0; argindex <= argv_size; argindex++)
 		ARGV[argindex] = lf->argv[argindex];
 	}
@@ -416,8 +474,6 @@ lf_pop()
     interactive = lf->interactive;
     inline_num = lf->inline_num;
     add_udv_by_name("GPVAL_LINENO")->udv_value.v.int_val = inline_num;
-    if_depth = lf->if_depth;
-    if_condition = lf->if_condition;
     if_open_for_else = lf->if_open_for_else;
 
     /* Restore saved input state and free the copy */
@@ -435,6 +491,21 @@ lf_pop()
     }
     free(lf->name);
     free(lf->cmdline);
+
+    /* Clean up any local variables going out of scope */
+    if (lf->local_variables)
+	lf_exit_scope(lf->depth);
+
+#ifdef USE_FUNCTIONBLOCKS
+    /* Restore action table context from which function block was called */
+    if (lf->shadow_at)
+	uncache_at(lf->shadow_at, lf->shadow_at_size);
+    if (evaluate_inside_functionblock > lf->depth) {
+	evaluate_inside_functionblock = 0;
+	FPRINTF((stderr, "Clearing flag evaluate_inside_functionblock on return to depth %d\n",
+		lf->depth));
+    }
+#endif
 
     lf_head = lf->prev;
     free(lf);
@@ -498,15 +569,18 @@ lf_push(FILE *fp, char *name, char *cmdline)
     lf->depth = lf_head ? lf_head->depth+1 : 0;	/* recursion depth */
     if (lf->depth > STACK_DEPTH)
 	int_error(NO_CARET, "load/eval nested too deeply");
-    lf->if_depth = if_depth;
     lf->if_open_for_else = if_open_for_else;
-    lf->if_condition = if_condition;
+    lf->local_variables = FALSE;
     lf->c_token = c_token;
     lf->num_tokens = num_tokens;
     lf->tokens = gp_alloc((num_tokens+1) * sizeof(struct lexical_unit),
 			  "lf tokens");
     memcpy(lf->tokens, token, (num_tokens+1) * sizeof(struct lexical_unit));
     lf->input_line = gp_strdup(gp_input_line);
+
+    /* Only relevant for function block calls */
+    lf->shadow_at = NULL;
+    lf->shadow_at_size = 0;
 
     lf->prev = lf_head;		/* link to stack */
     lf_head = lf;
@@ -521,16 +595,69 @@ lf_top()
     return (lf_head->fp);
 }
 
-/* called from main */
-void
-load_file_error()
+/* Guard against deleting or overwriting a script we are running from */
+TBOOLEAN
+called_from(const char *name)
 {
-    /* clean up from error in load_file */
-    /* pop off everything on stack */
+    LFS *frame = lf_head;
+    for (frame = lf_head; frame; frame = frame->prev) {
+	if (frame->name && !strcmp(name, frame->name))
+	    return TRUE;
+    }
+    return FALSE;
+}
+
+/* Clean up from error inside a "load" or "call" scope
+ * (called from main).
+ */
+void
+lf_reset_after_error()
+{
     free(failed_file_name);
     failed_file_name = NULL;
+    /* pop off everything on stack */
     while (lf_pop());
 }
+
+/* Restore any variables that were shadowed by a local variable */
+static void
+lf_exit_scope(int depth)
+{
+    struct udvt_entry *udv, *restored_udv;
+    struct udvt_entry *prev_udv = first_udv;
+    char prefix[13];
+    char *name;
+
+    snprintf(prefix, sizeof(prefix), "GPLOCAL_%03d_", depth);
+    FPRINTF((stderr, "Leaving scope of %s variables\n", prefix));
+
+    for (prev_udv = first_udv, udv = prev_udv->next_udv;
+	 udv;  prev_udv = udv, udv = udv->next_udv) {
+	if (strncmp(udv->udv_name,prefix,12))
+	    continue;
+	name = &(udv->udv_name[12]);
+	restored_udv = get_udv_by_name(name);
+	if (restored_udv) {
+	    if (restored_udv->udv_value.type == ARRAY) {
+		int subtype = restored_udv->udv_value.v.value_array[0].type;
+		if (subtype != TEMP_ARRAY && subtype != LOCAL_ARRAY)
+		    /* prevents free_value from deleting permanent array content */
+		    restored_udv->udv_value.type = NOTDEFINED;
+	    }
+	    free_value(&restored_udv->udv_value);
+	    restored_udv->udv_value = udv->udv_value;
+	    /* It is not sufficient to mark the shadow copy NOTDEFINED because if
+	     * we see it later we would spuriously restore the original from it.
+	     * Instead delete it altogether.
+	     */
+	    prev_udv->next_udv = udv->next_udv;
+	    free(udv->udv_name);
+	    free(udv);
+	    udv = prev_udv;
+	}
+    }
+}
+
 
 FILE *
 loadpath_fopen(const char *filename, const char *mode)
@@ -539,9 +666,6 @@ loadpath_fopen(const char *filename, const char *mode)
 
     /* The global copy of fullname is only for the benefit of post.trm's
      * automatic fontfile conversion via a constructed shell command.
-     * FIXME: There was a Feature Request to export the directory path
-     * in which a loaded file was found to a user-visible variable for the
-     * lifetime of that load.  This is close but without the lifetime.
      */
     free(loadpath_fontname);
     loadpath_fontname = NULL;
@@ -859,6 +983,7 @@ lp_parse(struct lp_style_type *lp, lp_class destination_class, TBOOLEAN allow_po
     int set_pn = 0;
     int set_dt = 0;
     int new_lt = 0;
+    int set_colormap = 0;
 
     /* EAM Mar 2010 - We don't want properties from a user-defined default
      * linetype to override properties explicitly set here.  So fill in a
@@ -874,15 +999,15 @@ lp_parse(struct lp_style_type *lp, lp_class destination_class, TBOOLEAN allow_po
     }
 
     while (!END_OF_COMMAND) {
+	TBOOLEAN lt_really_means_lc = FALSE;
 
-	/* This special case is to flag an attempt to "set object N lt <lt>",
-	 * which would otherwise be accepted but ignored, leading to confusion
-	 * FIXME:  Couldn't this be handled at a higher level?
+	/* This special case is to catch an attempt to "set object N lt <lt>",
+	 * which would otherwise be accepted but ignored, leading to confusion.
 	 */
 	if ((destination_class == LP_NOFILL)
 	&&  (equals(c_token,"lt") || almost_equals(c_token,"linet$ype"))) {
-	    int_error(c_token, "object linecolor must be set using fillstyle border");
-	}
+	    lt_really_means_lc = TRUE;
+	} else
 
 	if (almost_equals(c_token, "linet$ype") || equals(c_token, "lt")) {
 	    if (set_lt++)
@@ -940,11 +1065,14 @@ lp_parse(struct lp_style_type *lp, lp_class destination_class, TBOOLEAN allow_po
 	if ((destination_class == LP_NOFILL || destination_class == LP_ADHOC)
 	&&  (equals(c_token,"fc") || almost_equals(c_token,"fillc$olor"))
 	&&  (!almost_equals(c_token+1, "pal$ette"))
-	   )
+	&&  (!almost_equals(c_token+1, "var$iable")) ) {
+	    FPRINTF((stderr, "ignoring 'fc' request\n"));
 	    break;
+	}
 
 	if (equals(c_token,"lc") || almost_equals(c_token,"linec$olor")
 	||  equals(c_token,"fc") || almost_equals(c_token,"fillc$olor")
+	|| lt_really_means_lc
 	   ) {
 	    if (set_pal++)
 		break;
@@ -953,8 +1081,19 @@ lp_parse(struct lp_style_type *lp, lp_class destination_class, TBOOLEAN allow_po
 		c_token--;
 		parse_colorspec(&(newlp.pm3d_color), TC_RGB);
 	    } else if (almost_equals(c_token, "pal$ette")) {
-		c_token--;
-		parse_colorspec(&(newlp.pm3d_color), TC_Z);
+		/* The next word could be any of {z|cb|frac|<colormap-name>}.
+		 * Check first for a colormap name.
+		 */
+		udvt_entry *colormap = get_colormap(c_token+1);
+		if (colormap) {
+		    newlp.pm3d_color.type = TC_COLORMAP;
+		    newlp.colormap = colormap;
+		    set_colormap++;
+		    c_token += 2;
+		} else {
+		    c_token--;
+		    parse_colorspec(&(newlp.pm3d_color), TC_Z);
+		}
 	    } else if (equals(c_token,"bgnd")) {
 		newlp.pm3d_color.type = TC_LT;
 		newlp.pm3d_color.lt = LT_BACKGROUND;
@@ -1134,6 +1273,9 @@ lp_parse(struct lp_style_type *lp, lp_class destination_class, TBOOLEAN allow_po
 	lp->custom_dash_pattern = newlp.custom_dash_pattern;
     }
 
+    if (set_colormap) {
+	lp->colormap = newlp.colormap;
+    }
 
     return new_lt;
 }
@@ -1350,23 +1492,33 @@ parse_colorspec(struct t_colorspec *tc, int options)
 }
 
 long
+lookup_color_name(char *string)
+{
+    int iret;
+    long color = -2;
+
+    iret = lookup_table_nth(pm3d_color_names_tbl, string);
+    if (iret >= 0)
+	color = pm3d_color_names_tbl[iret].value;
+    else if (string[0] == '#')
+	iret = sscanf(string,"#%lx",&color);
+    else if (string[0] == '0' && (string[1] == 'x' || string[1] == 'X'))
+	iret = sscanf(string,"%lx",&color);
+
+    return color;
+}
+
+long
 parse_color_name()
 {
     char *string;
-    long color = -2;
+    long color;
 
     /* Terminal drivers call this after seeing a "background" option */
     if (almost_equals(c_token,"rgb$color") && almost_equals(c_token-1,"back$ground"))
 	c_token++;
     if ((string = try_to_get_string())) {
-	int iret;
-	iret = lookup_table_nth(pm3d_color_names_tbl, string);
-	if (iret >= 0)
-	    color = pm3d_color_names_tbl[iret].value;
-	else if (string[0] == '#')
-	    iret = sscanf(string,"#%lx",&color);
-	else if (string[0] == '0' && (string[1] == 'x' || string[1] == 'X'))
-	    iret = sscanf(string,"%lx",&color);
+	color = lookup_color_name(string);
 	free(string);
 	if (color == -2)
 	    int_error(c_token, "unrecognized color name and not a string \"#AARRGGBB\" or \"0xAARRGGBB\"");
@@ -1374,7 +1526,7 @@ parse_color_name()
 	color = int_expression();
     }
 
-    return (unsigned int)(color);
+    return (unsigned long)(color);
 }
 
 /* arrow parsing...
@@ -1566,4 +1718,58 @@ get_image_options(t_image *image)
 	image->fallback = TRUE;
     }
 
+}
+
+/*
+ * Try to interpret the next token in a command line as the name of a colormap.
+ * If it seems to belong to a valid colormap, return a pointer.
+ * Otherwise return NULL.  The caller is responsible for reporting an error.
+ */
+struct udvt_entry *
+get_colormap(int token)
+{
+    udvt_entry *colormap = NULL;
+
+    if (type_udv(token) == ARRAY) {
+	udvt_entry *udv = add_udv(token);
+	if ((udv->udv_value.v.value_array[0].type == COLORMAP_ARRAY)
+	&&  (udv->udv_value.v.value_array[0].v.int_val >= 2))
+	    colormap = udv;
+    }
+    return colormap;
+}
+
+/*
+ * Create a pixmap containing an existing colormap palette.
+ * This can be used to produce a colorbox for a named palette
+ * separate from the automatic colorbox generated for the main palette.
+ */
+void
+pixmap_from_colormap(t_pixmap *pixmap)
+{
+    udvt_entry *colormap = get_colormap(c_token);
+    unsigned int rgb;
+    int size, i, ip;
+
+    if (!colormap)
+	int_error(c_token, "not a colormap");
+    c_token++;
+    free(pixmap->colormapname);
+    pixmap->colormapname = gp_strdup(colormap->udv_name);
+    size = colormap->udv_value.v.value_array[0].v.int_val;
+
+    pixmap->image_data = gp_realloc( pixmap->image_data,
+			size * 4. * sizeof(coordval), "pixmap");
+
+    /* Unpack ARGB colormap entry into 4 separate values R G B A */
+    for (i = 1, ip = 0; i <= size; i++) {
+	rgb = colormap->udv_value.v.value_array[i].v.int_val;
+	pixmap->image_data[ip++] = ((rgb >> 16) & 0xff) / 255.;
+	pixmap->image_data[ip++] = ((rgb >> 8) & 0xff) / 255.;
+	pixmap->image_data[ip++] = ((rgb) & 0xff) / 255.;
+	pixmap->image_data[ip++] = 255-((rgb >> 24) & 0xff);
+    }
+
+    pixmap->ncols = 1;
+    pixmap->nrows = size;
 }

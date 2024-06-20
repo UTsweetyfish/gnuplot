@@ -44,26 +44,60 @@ endif
 override_dh_auto_configure:
 	mkdir -p $(BUILDDIR_NOX)
 	cd $(BUILDDIR_NOX); CONFIG_SHELL=/bin/sh ./../../configure $(conf_opts) --with-qt=no --without-x --disable-wxwidgets
+ifeq (,$(filter $(DEB_BUILD_PROFILES),nox-only))
 	mkdir -p $(BUILDDIR_X11)
-	cd $(BUILDDIR_X11); CONFIG_SHELL=/bin/sh ../../configure $(conf_opts) --with-qt=no --with-tutorial
+	cd $(BUILDDIR_X11); CONFIG_SHELL=/bin/sh ../../configure $(conf_opts) --with-qt=no
 	mkdir -p $(BUILDDIR_QT)
 	cd $(BUILDDIR_QT); CONFIG_SHELL=/bin/sh ../../configure $(conf_opts)  --enable-qt
+endif
 
 override_dh_auto_build-arch:
 	dh_auto_build -a -- -C $(BUILDDIR_NOX)/src
+ifeq (,$(filter $(DEB_BUILD_PROFILES),nox-only))
 	dh_auto_build -a -- -C $(BUILDDIR_X11) pkglibexecdir='$$(libexecdir)'
 	dh_auto_build -a -- -C $(BUILDDIR_QT) pkglibexecdir='$$(libexecdir)'
+endif
 
+# Currently the docs are built in the -x11 configuration. Moving them to the
+# -nox configuration causes some problems that I don't want to debug right now.
+# So I don't build gnuplot-doc in the nox-only profile at all
+ifeq (,$(filter $(DEB_BUILD_PROFILES),nox-only))
+# the upstream build isn't set up properly: 'make -n' and 'make pdf' say stuff like
+#
+#   No rule to make target '../src/bf_test', needed by 'binary1'
+#
+# So I manually do a "make" and then "make" for the separate targets.
 override_dh_auto_build-indep:
-	cd $(BUILDDIR_X11)/docs; $(MAKE) pdf; $(MAKE) ps; $(MAKE) html; $(MAKE) info; ls
-	cd $(BUILDDIR_X11)/tutorial; $(MAKE) pdf; $(MAKE) ps; ls
-	sed -i '/<ADDRESS>/,/<\/ADDRESS>/{//!d}' $(BUILDDIR_X11)/docs/htmldocs/index.html
-	sed -i '/<ADDRESS>/,/<\/ADDRESS>/{//!d}' $(BUILDDIR_X11)/docs/htmldocs/figures.html
+	$(MAKE) -C $(BUILDDIR_X11)/docs      && \
+	$(MAKE) -C $(BUILDDIR_X11)/docs pdf  && \
+	$(MAKE) -C $(BUILDDIR_X11)/docs html && \
+	$(MAKE) -C $(BUILDDIR_X11)/docs info
+
 	rm -f $(BUILDDIR_X11)/docs/htmldocs/internals.pl
 	rm -f $(BUILDDIR_X11)/docs/htmldocs/labels.pl
 	rm -f $(BUILDDIR_X11)/docs/htmldocs/images.log
 	rm -f $(BUILDDIR_X11)/docs/htmldocs/WARNINGS
 	rm -f $(BUILDDIR_X11)/docs/gpcard.ps
+
+override_dh_installinfo:
+	dh_installinfo -pgnuplot-doc $(BUILDDIR_X11)/docs/gnuplot.info
+
+override_installchangelogs:
+	dh_installchangelogs -pgnuplot-doc ChangeLog
+
+override_dh_compress-indep:
+	dh_compress -i -Xexamples -Xtutorial -Xhtmldocs -X.dvi -X.pdf -X.ps
+
+
+else
+
+override_dh_auto_build-indep:
+	@echo "ERROR! The 'nox-only' profile is meant for arch-any builds ONLY. Currently this profile would"
+	@echo "try to install some non-existing qt files into the gnuplot-data package, which would cause"
+	@echo "dh_install to fail. See https://bugs.debian.org/1067582"
+	false
+
+endif
 
 override_dh_auto_install:
 	$(MAKE) -C $(BUILDDIR_NOX) install DESTDIR=$(CURDIR)/debian/tmp/NOX/ \
@@ -71,6 +105,7 @@ override_dh_auto_install:
 	mv $(CURDIR)/debian/tmp/NOX/usr/bin/gnuplot $(CURDIR)/debian/tmp/NOX/usr/bin/gnuplot-nox
 	mv $(CURDIR)/debian/tmp/NOX/usr/share/man/man1/gnuplot.1 $(CURDIR)/debian/tmp/NOX/usr/share/man/man1/gnuplot-nox.1
 	mv $(CURDIR)/debian/tmp/NOX/usr/share/gnuplot/gnuplot.gih $(CURDIR)/debian/tmp/NOX/usr/share/gnuplot/gnuplot-nox.gih
+ifeq (,$(filter $(DEB_BUILD_PROFILES),nox-only))
 	$(MAKE) -C $(BUILDDIR_X11) install DESTDIR=$(CURDIR)/debian/tmp/X11/ \
 		pkglibexecdir='$$(libexecdir)'
 	mv $(CURDIR)/debian/tmp/X11/usr/bin/gnuplot $(CURDIR)/debian/tmp/X11/usr/bin/gnuplot-x11
@@ -81,22 +116,21 @@ override_dh_auto_install:
 	mv $(CURDIR)/debian/tmp/QT/usr/bin/gnuplot $(CURDIR)/debian/tmp/QT/usr/bin/gnuplot-qt
 	mv $(CURDIR)/debian/tmp/QT/usr/share/man/man1/gnuplot.1 $(CURDIR)/debian/tmp/QT/usr/share/man/man1/gnuplot-qt.1
 	mv $(CURDIR)/debian/tmp/QT/usr/share/gnuplot/gnuplot.gih $(CURDIR)/debian/tmp/QT/usr/share/gnuplot/gnuplot-qt.gih
-	rm -f $(CURDIR)/../demo/Makefile
-	rm -f $(CURDIR)/../demo/plugin/Makefile
 	rm -f $(BUILDDIR_X11)/demo/Makefil*
 	rm -f $(BUILDDIR_X11)/demo/plugin/Makefil*
+endif
+	rm -f $(CURDIR)/../demo/Makefile
+	rm -f $(CURDIR)/../demo/plugin/Makefile
 
 execute_after_dh_installman:
-	rm -rf $(CURDIR)/debian/tmp/X11/usr/local
 	rm -rf $(CURDIR)/debian/tmp/NOX/usr/local
-	rm -rf $(CURDIR)/debian/tmp/X11/usr/share
 	rm -rf $(CURDIR)/debian/tmp/NOX/usr/share
+ifeq (,$(filter $(DEB_BUILD_PROFILES),nox-only))
+	rm -rf $(CURDIR)/debian/tmp/X11/usr/local
+	rm -rf $(CURDIR)/debian/tmp/X11/usr/share
+	rm -rf $(CURDIR)/debian/tmp/QT/usr/share/man
+endif
 
-override_dh_installinfo:
-	dh_installinfo -pgnuplot-doc $(BUILDDIR_X11)/docs/gnuplot.info
-
-override_installchangelogs:
-	dh_installchangelogs -pgnuplot-doc ChangeLog
 
 execute_after_dh_installman-arch:
 	# Fix manpage for nox-version. (Closes: #744218)
@@ -106,8 +140,8 @@ execute_after_dh_installman-arch:
 
 execute_after_dh_auto_clean:
 	rm -rf $(BUILDDIR_NOX)
+ifeq (,$(filter $(DEB_BUILD_PROFILES),nox-only))
 	rm -rf $(BUILDDIR_X11)
 	rm -rf $(BUILDDIR_QT)
+endif
 
-override_dh_compress-indep:
-	dh_compress -i -Xexamples -Xtutorial -Xhtmldocs -X.dvi -X.pdf -X.ps

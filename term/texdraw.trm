@@ -79,7 +79,7 @@ TERM_PUBLIC void TEXDRAW_arrow(unsigned int sx, unsigned int sy,
 				int head);
 TERM_PUBLIC void TEXDRAW_put_text(unsigned int x, unsigned int y, const char str[]);
 TERM_PUBLIC int TEXDRAW_justify_text(enum JUSTIFY mode);
-TERM_PUBLIC int TEXDRAW_text_angle(int ang);
+TERM_PUBLIC int TEXDRAW_text_angle(float ang);
 TERM_PUBLIC void TEXDRAW_set_color(t_colorspec *colorspec);
 TERM_PUBLIC int TEXDRAW_make_palette(t_sm_palette *);
 TERM_PUBLIC void TEXDRAW_set_color(t_colorspec *);
@@ -412,7 +412,7 @@ TEXDRAW_graphics()
 		    term->xmax, term->ymax);
     } else {
 	fprintf(gpoutfile, "\\move (0 0) \\rlvec (%d 0) \\rlvec (0 %d) \\rlvec (%d 0) \\ifill f:%0.2f\n",
-		    term->xmax, term->ymax, -term->xmax,
+		    term->xmax, term->ymax, - (int) term->xmax,
 		    TEXDRAW_background);
     }
 
@@ -727,8 +727,9 @@ TEXDRAW_justify_text(enum JUSTIFY mode)
 
 
 TERM_PUBLIC int
-TEXDRAW_text_angle(int ang)
+TEXDRAW_text_angle(float dang)
 {
+    int ang = dang;
     while (ang < 0) ang += 360;
     ang %= 360;
     TEXDRAW_angle = ang;
@@ -816,7 +817,7 @@ TEXDRAW_fillbox(int style,
     fprintf(gpoutfile, "\\move (%d %d)", x1, y1);
     fprintf(gpoutfile, "\\rlvec (%d %d)", width, 0);
     fprintf(gpoutfile, "\\rlvec (%d %d)", 0, height);
-    fprintf(gpoutfile, "\\rlvec (%d %d)", -width, 0);
+    fprintf(gpoutfile, "\\rlvec (%d %d)", - (int) width, 0);
     // the polygon is closed automatically by fill
     fprintf(gpoutfile, "\\ifill f:%0.2f\n", gray);
 }
@@ -924,10 +925,10 @@ START_HELP(texdraw)
 " caps and mitered joins and is the default.",
 "",
 " `linewidth` and `pointscale` scale the width of lines and the size of point",
-" symbols, respectively. `pointscale`only applies to `gppoints`.",
+" symbols, respectively. `pointscale` only applies to `gppoints`.",
 "",
 " `psarrows` draws `arrow`s using TeXdraw commands which are shorter but do not",
-" offer all options. `gparrows` selects drawing drawing arrows using gnuplot's",
+" offer all options. `gparrows` selects drawing arrows using gnuplot's",
 " own routine for full functionality instead.  Similarly, `texpoints`, and ",
 " `gppoints` select LaTeX symbols or gnuplot's point drawing routines."
 END_HELP(texdraw)

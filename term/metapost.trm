@@ -74,7 +74,7 @@ TERM_PUBLIC void MP_arrow(unsigned int sx, unsigned int sy,
 			   int head);
 TERM_PUBLIC void MP_put_text(unsigned int x, unsigned int y, const char str[]);
 TERM_PUBLIC int MP_justify_text(enum JUSTIFY mode);
-TERM_PUBLIC int MP_text_angle(int ang);
+TERM_PUBLIC int MP_text_angle(float ang);
 TERM_PUBLIC void MP_reset(void);
 TERM_PUBLIC int MP_set_font(const char *font);
 TERM_PUBLIC void MP_boxfill(int style, unsigned int x1,
@@ -213,8 +213,6 @@ static struct gen_table MP_opts[] = {
 TERM_PUBLIC void
 MP_options()
 {
-    struct value a;
-
     /* Annoying hack to handle the case of 'set termoption' after */
     /* we have already initialized the terminal.                  */
     if (!almost_equals(c_token-1, "termopt$ion")) {
@@ -307,8 +305,7 @@ MP_options()
 	case MP_OPT_MAGNIFICATION:
 	    c_token++;
 	    if (!END_OF_COMMAND)	/* global text scaling */
-		MP_textmag = (double) real(const_express(&a));
-	    /* c_token++; */ /* Needed ??? */
+		MP_textmag = real_expression();
 	    break;
 	case MP_OPT_FONT:
 	    c_token++;
@@ -328,7 +325,7 @@ MP_options()
 	    } else if (option == MP_OPT_FONT) {
 		int_error(c_token,"expecting font name");
 	    } else if (!END_OF_COMMAND) {	/*font size */
-		MP_fontsize = (double) real(const_express(&a));
+		MP_fontsize = real_expression();
 		c_token++;
 	    }
 	    break;
@@ -794,7 +791,7 @@ MP_justify_text(enum JUSTIFY mode)
 }
 
 TERM_PUBLIC int
-MP_text_angle(int ang)
+MP_text_angle(float ang)
 {
     /* Metapost code does the conversion */
     MP_ang = ang;
@@ -807,7 +804,7 @@ MP_set_font(const char *font)
     if (*font) {
 	size_t sep = strcspn(font, ",");
 	if (sep < sizeof(MP_fontname))
-	    strncpy(MP_fontname, font, sizeof(MP_fontname));
+	    strncpy(MP_fontname, font, sizeof(MP_fontname)-1);
 	sscanf(&(font[sep + 1]), "%lf", &MP_fontsize);
 	if (MP_fontsize < 5)
 	    MP_fontsize = 5.0;
@@ -1066,6 +1063,7 @@ START_HELP(mp)
 "?mp",
 "?metapost",
 "",
+" Note: legacy terminal (not built by default).",
 " The `mp` driver produces output intended to be input to the Metapost program.",
 " Running Metapost on the file creates EPS files containing the plots. By",
 " default, Metapost passes all text through TeX.  This has the advantage of",

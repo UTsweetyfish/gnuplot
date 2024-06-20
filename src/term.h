@@ -112,22 +112,10 @@
 #endif
 
 /****************************************************************************/
-/* MS-DOS */
-#if defined(MSDOS)
-
-/* MSDOS with emx-gcc compiler */
-# if defined(__EMX__)
-   /* Vesa-Cards */
-#  define EMXVESA
-#  include "emxvga.trm"
-# endif				/* MSDOS && EMX */
-
 /* MSDOS with OpenWatcom compiler */
-# if defined(__WATCOMC__)
-#  include "pc.trm"
-# endif
-
-#endif /* MSDOS */
+#if defined(MSDOS) && defined(__WATCOMC__)
+# include "pc.trm"
+#endif
 /****************************************************************************/
 
 /* Windows */
@@ -146,10 +134,6 @@
 #ifdef OS2
 /* presentation manager */
 # include "pm.trm"
-# ifdef EMXVESA
-/* works with DOS and OS/2 (windowed/full screen) */
-#  include "emxvga.trm"
-# endif
 #endif /* OS2 */
 
 
@@ -157,10 +141,8 @@
 /* Terminals for various Unix platforms                                    */
 /***************************************************************************/
 
-/* VAX Windowing System requires UIS libraries */
-#ifdef UIS
-# include "vws.trm"
-#endif
+/* none */
+
 
 /****************************************************************************/
 /* Terminals not relevant for MSDOS, MS-Windows */
@@ -205,10 +187,14 @@
 /* obsolete: use 'set term postscript level1 */
 /* #include "ai.trm" */
 
-/* HTML Canvas terminal */
+/* Support routines requiring gdlib or cairo */
 #if (defined(HAVE_GD_PNG) || defined(HAVE_CAIROPDF))
 # include "write_png_image.c"
+# define HAVE_KITTY_TERM
+# include "kitty.c"
 #endif
+
+/* HTML Canvas terminal */
 #include "canvas.trm"
 
 /* Computer Graphics Metafile (eg ms office) */
@@ -228,6 +214,11 @@
 /* caca: color ascii art terminal using libcaca */
 #ifdef HAVE_LIBCACA
 # include "caca.trm"
+#endif
+
+/* pseudo-graphics using block or Braille characters */
+#ifndef NO_BITMAP_SUPPORT
+# include "block.trm"
 #endif
 
 /* Legacy terminal for export to AutoCad (Release 10.x)
@@ -360,10 +351,14 @@
 #include "texdraw.trm"
 
 /* METAFONT */
+#ifdef WITH_METAFONT
 #include "metafont.trm"
+#endif
 
 /* METAPOST */
+#ifdef WITH_METAPOST
 #include "metapost.trm"
+#endif
 
 /* ConTeXt */
 #include "context.trm"
@@ -398,6 +393,11 @@
 
 #ifdef HAVE_CAIROPDF
 # include "cairo.trm"
+#endif
+
+/* webp must come after cairo */
+#ifdef HAVE_WEBP
+# include "webp.trm"
 #endif
 
 #ifdef HAVE_LUA

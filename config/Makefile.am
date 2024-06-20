@@ -7,9 +7,9 @@ all:
 ##m4-files-begin
 EXTRA_DIST = MacOSX Makefile.am.in buildvms.com config.cyg config.dj2 \
 config.mgw config.nt config.os2 config.oww config.wc djconfig.sh \
-make_vms.com makefile.cyg makefile.emx makefile.g makefile.os2 \
-makefile.vms makefile.wc watcom/Makefile watcom/config.h cygwin/Makefile \
-mingw/Makefile msvc/Makefile djgpp/Makefile djgpp/config.h 
+make_vms.com makefile.cyg makefile.g makefile.os2 makefile.vms \
+makefile.wc watcom/Makefile watcom/config.h cygwin/Makefile mingw/Makefile \
+msvc/Makefile 
 ##m4-files-end
 
 Makefile.am: Makefile.am.in
@@ -18,7 +18,6 @@ Makefile.am: Makefile.am.in
 	echo EXTRA_DIST = MacOSX Makefile.am.in buildvms.com	\
 	  config.* djconfig.sh make_vms.com makefile.* watcom/Makefile	\
 	  watcom/config.h cygwin/Makefile mingw/Makefile msvc/Makefile \
-	  djgpp/Makefile djgpp/config.h \
 	  | fmt \
           | (tr '\012' @; echo) \
 	  | sed 's/@$$/%/;s/@/ \\@/g' \
