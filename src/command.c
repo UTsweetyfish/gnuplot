@@ -33,15 +33,6 @@
 /*
  * Changes:
  *
- * Feb 5, 1992  Jack Veenstra   (veenstra@cs.rochester.edu) Added support to
- * filter data values read from a file through a user-defined function before
- * plotting. The keyword "thru" was added to the "plot" command. Example
- * syntax: f(x) = x / 100 plot "test.data" thru f(x) This example divides all
- * the y values by 100 before plotting. The filter function processes the
- * data before any log-scaling occurs. This capability should be generalized
- * to filter x values as well and a similar feature should be added to the
- * "splot" command.
- *
  * 19 September 1992  Lawrence Crowl  (crowl@cs.orst.edu)
  * Added user-specified bases for log scaling.
  *
@@ -76,8 +67,10 @@
 #include "datafile.h"
 #include "getcolor.h"
 #include "gp_hist.h"
-#include "gp_time.h"
+#include "gplocale.h"
+#include "loadpath.h"
 #include "misc.h"
+#include "multiplot.h"
 #include "parse.h"
 #include "plot.h"
 #include "plot2d.h"
@@ -90,7 +83,7 @@
 #include "tables.h"
 #include "term_api.h"
 #include "util.h"
-#include "variable.h"
+#include "voxelgrid.h"
 #include "external.h"
 
 #ifdef USE_MOUSE
@@ -107,8 +100,11 @@ int paused_for_mouse = 0;
 # include <os2.h>
 static char *input_line_SharedMem = NULL; /* pointer to the shared memory for mouse messages */
 static HEV semInputReady = 0;      /* mouse event semaphore */
+static HEV semPause = 0;           /* pause event semaphore */
 static TBOOLEAN thread_rl_Running = FALSE;  /* running status */
 static int thread_rl_RetCode = -1; /* return code from readline input thread */
+static int thread_pause_RetCode = -1; /* return code from pause input thread */
+static TBOOLEAN pause_internal;    /* flag to indicate not to use a dialog box */
 #endif /* OS2_IPC */
 
 #ifndef _WIN32
@@ -137,11 +133,7 @@ static int thread_rl_RetCode = -1; /* return code from readline input thread */
 # include <conio.h>		/* for getch() */
 #endif
 
-#ifdef VMS
-int vms_vkid;			/* Virtual keyboard id */
-int vms_ktid;			/* key table id, for translating keystrokes */
-#endif /* VMS */
-
+typedef enum ifstate {IF_INITIAL=1, IF_TRUE, IF_FALSE} ifstate;
 
 /* static prototypes */
 static void command(void);
@@ -153,7 +145,11 @@ static int read_line(const char *prompt, int start);
 static void do_system(const char *);
 static void test_palette_subcommand(void);
 static int find_clause(int *, int *);
+static void if_else_command(ifstate if_state);
+static void old_if_command(struct at_type *expr);
 static int report_error(int ierr);
+static void load_or_call_command( TBOOLEAN call );
+       void do_shell(void);
 
 static int expand_1level_macros(void);
 
@@ -165,26 +161,38 @@ char *gp_input_line;
 size_t gp_input_line_len;
 int inline_num;			/* input line number */
 
+/* Points to structure holding dummy parameter values
+ * to be used during function evaluation
+ */
 struct udft_entry *dummy_func;
 
 /* support for replot command */
-char *replot_line;
-int plot_token;			/* start of 'plot' command */
+char *replot_line = NULL;
+int plot_token = 0;		/* start of 'plot' command */
+
+/* support for multiplot playback */
+TBOOLEAN last_plot_was_multiplot = FALSE;
 
 /* flag to disable `replot` when some data are sent through stdin;
- * used by mouse/hotkey capable terminals */
+ * used by mouse/hotkey capable terminals
+ */
 TBOOLEAN replot_disabled = FALSE;
+
+/* flag to show we are inside a plot/splot/replot/refresh/stats
+ * command and therefore should not allow starting another one
+ * e.g. from a function block
+ */
+TBOOLEAN inside_plot_command = FALSE;
 
 /* output file for the print command */
 FILE *print_out = NULL;
 struct udvt_entry *print_out_var = NULL;
 char *print_out_name = NULL;
+char *print_sep = NULL;
 
 /* input data, parsing variables */
 int num_tokens, c_token;
 
-int if_depth = 0;
-TBOOLEAN if_condition = FALSE;
 TBOOLEAN if_open_for_else = FALSE;
 
 static int clause_depth = 0;
@@ -247,24 +255,59 @@ thread_read_line(void *arg)
     DosPostEventSem(semInputReady);
 }
 
+void
+thread_pause(void *arg)
+{
+    int rc = 2;
+
+    if (!pause_internal)
+	rc = PM_pause(arg != NULL ? arg : "paused");
+    if (rc == 2) {
+	/* rc==2: no dialog, listen to stdin */
+	int junk;
+
+	if (arg != NULL) fputs(arg, stderr);
+	do {
+	    junk = fgetc(stdin);
+	} while (junk != EOF && junk != '\r' && junk != '\n');
+	thread_pause_RetCode = (junk == EOF) ? 0 : 1;
+    } if (rc == 3) {
+	/* dialog/menu active, wait for event semaphore */
+	ULONG u;
+	DosResetEventSem(semPause, &u);
+	DosWaitEventSem(semPause, SEM_INDEFINITE_WAIT);
+	/* now query result */
+	thread_pause_RetCode = PM_pause(NULL);
+    } else {
+	/* rc==1: OK; rc==0: cancel */
+	thread_pause_RetCode = rc;
+    }
+    DosPostEventSem(semInputReady);
+}
+
 
 void
 os2_ipc_setup(void)
 {
     APIRET rc;
-    char semInputReadyName[40];
-    char mouseSharedMemName[40];
+    char name[40];
 
     /* create input event semaphore */
-    sprintf(semInputReadyName, "\\SEM32\\GP%i_Input_Ready", getpid());
-    rc = DosCreateEventSem(semInputReadyName, &semInputReady, 0, 0);
+    sprintf(name, "\\SEM32\\GP%i_Input_Ready", getpid());
+    rc = DosCreateEventSem(name, &semInputReady, 0, 0);
+    if (rc != 0)
+	fputs("DosCreateEventSem error\n", stderr);
+
+    /* create pause event semaphore */
+    sprintf(name, "\\SEM32\\GP%i_Pause_Ready", getpid());
+    rc = DosCreateEventSem(name, &semPause, 0, 0);
     if (rc != 0)
 	fputs("DosCreateEventSem error\n", stderr);
 
     /* allocate shared memory */
-    sprintf(mouseSharedMemName, "\\SHAREMEM\\GP%i_Mouse_Input", getpid());
+    sprintf(name, "\\SHAREMEM\\GP%i_Mouse_Input", getpid());
     rc = DosAllocSharedMem((PPVOID) &input_line_SharedMem,
-		mouseSharedMemName, MAX_LINE_LEN,
+		name, MAX_LINE_LEN,
 		PAG_READ | PAG_WRITE | PAG_COMMIT);
     if (rc != 0)
 	fputs("DosAllocSharedMem ERROR\n", stderr);
@@ -318,12 +361,32 @@ os2_ipc_dispatch_event(void)
     thread_rl_RetCode = 0;
     return 1;
 }
+
+
+int
+os2_ipc_waitforinput(int mode)
+{
+    ULONG u;
+
+    if (mode == TERM_ONLY_CHECK_MOUSING) {
+	if (semInputReady == 0)
+	    return 0;
+
+	if (DosWaitEventSem(semInputReady, SEM_IMMEDIATE_RETURN) == 0) {
+	    os2_ipc_dispatch_event();
+	    DosResetEventSem(semInputReady, &u);
+	}
+    }
+    return 0;
+}
 #endif /* OS2_IPC */
 
 
 int
 com_line()
 {
+    int return_value = 0;
+
     if (multiplot) {
 	/* calls int_error() if it is not happy */
 	term_check_multiplot_okay(interactive);
@@ -336,15 +399,7 @@ com_line()
 	ULONG u;
 
 	if (!thread_rl_Running) {
-	    int res;
-
-	    // Discard pending mouse events to avoid spurious side effects.
-	    // This seems only necessary since we do no handle mouse events
-	    // anywhere else (like in pause, during load, etc.).
-	    input_line_SharedMem[0] = 0;
-	    DosResetEventSem(semInputReady, &u);
-
-	    res = _beginthread(thread_read_line, NULL, 32768, NULL);
+	    int res = _beginthread(thread_read_line, NULL, 32768, NULL);
 	    if (res == -1)
 		fputs("error command.c could not begin thread\n", stderr);
 	}
@@ -371,11 +426,13 @@ com_line()
      * (DFK 11/89)
      */
     screen_ok = interactive;
+    return_value = do_line();
 
-    if (do_line())
-	return (1);
-    else
-	return (0);
+    /* If this line is part of a multiplot, save it for later replay */
+    if (multiplot && !multiplot_playback)
+	append_multiplot_line(gp_input_line);
+
+    return return_value;
 }
 
 
@@ -399,9 +456,12 @@ do_line()
     }
 
     /* Leading '!' indicates a shell command that bypasses normal gnuplot
-     * tokenization and parsing.  This doesn't work inside a bracketed clause.
+     * tokenization and parsing.
+     * This doesn't work inside a bracketed clause or in a function block.
      */
     if (is_system(*gp_input_line)) {
+	if (evaluate_inside_functionblock)
+	    int_error(NO_CARET, "bare shell commands not accepted in a function block");
 	do_system(gp_input_line + 1);
 	return (0);
     }
@@ -412,8 +472,6 @@ do_line()
 	if (gp_input_line[token[num_tokens].start_index] == '#')
 	    gp_input_line[token[num_tokens].start_index] = NUL;
     }
-
-    if_depth = 0;
 
     num_tokens = scanner(&gp_input_line, &gp_input_line_len);
 
@@ -429,7 +487,6 @@ do_line()
 	if (lf_head && lf_head->depth > 0) {
 	    /* This catches the case that we are inside a "load foo" operation
 	     * and therefore requesting interactive input is not an option.
-	     * FIXME: or is it?
 	     */
 	    int_error(NO_CARET, "Syntax error: missing block terminator }");
 	}
@@ -551,6 +608,12 @@ do_string_replot(const char *s)
 {
     do_string(s);
 
+    /* EXPERIMENTAL */
+    if (last_plot_was_multiplot && !multiplot && !replot_disabled) {
+	replay_multiplot();
+	return;
+    }
+
     if (volatile_data && (E_REFRESH_NOT_OK != refresh_ok)) {
 	if (display_ipc_commands())
 	    fprintf(stderr, "refresh\n");
@@ -634,9 +697,20 @@ define()
 	    int_error(c_token, "Cannot set internal variables GPVAL_ GPFUN_ MOUSE_");
 	start_token = c_token;
 	c_token += 2;
+	const_express(&result);
+
+	/* Special handling needed to safely return an array */
+	if (result.type == ARRAY)
+	    make_array_permanent(&result);
+
+	/* If the variable name was previously in use then depending on its
+	 * old type it may have attached memory that needs to be freed.
+	 * Note: supposedly the old variable type cannot be datablock because
+	 *       the syntax  $name = foo  is not accepted so we would not be here.
+	 *       However, weird cases like FOO = value($datablock) violate this rule
+	 *       and leave FOO as a datablock whose name does not start with $.
+	 */
 	udv = add_udv(start_token);
-	(void) const_express(&result);
-	/* Prevents memory leak if the variable name is re-used */
 	free_value(&udv->udv_value);
 	udv->udv_value = result;
     }
@@ -798,6 +872,8 @@ lower_command(void)
 /*
  * Arrays are declared using the syntax
  *    array A[size] { = [ element, element, ... ] }
+ *    array A = [ .., .. ]
+ *    array A = <expression>     (only valid if <expression> returns an array)
  * where size is an integer and space is reserved for elements A[1] through A[size]
  * The size itself is stored in A[0].v.int_val.A
  * The list of initial values is optional.
@@ -811,6 +887,7 @@ array_command()
 {
     int nsize = 0;	/* Size of array when we leave */
     int est_size = 0;	/* Estimated size */
+    TBOOLEAN empty_array = FALSE;
     struct udvt_entry *array;
     struct value *A;
     int i;
@@ -818,9 +895,7 @@ array_command()
     /* Create or recycle a udv containing an array with the requested name */
     if (!isletter(++c_token))
 	int_error(c_token, "illegal variable name");
-    array = add_udv(c_token);
-    free_value(&array->udv_value);
-    c_token++;
+    array = add_udv(c_token++);
 
     if (equals(c_token, "[")) {
 	c_token++;
@@ -828,6 +903,8 @@ array_command()
 	if (!equals(c_token++,"]"))
 	    int_error(c_token-1, "expecting array[size>0]");
     } else if (equals(c_token, "=") && equals(c_token+1, "[")) {
+	if (equals(c_token+2,"]"))
+	    empty_array = TRUE;
 	/* Estimate size of array by counting commas in the initializer */
 	for ( i = c_token+2; i < num_tokens; i++) {
 	    if (equals(i,",") || equals(i,"]"))
@@ -836,26 +913,37 @@ array_command()
 		break;
 	}
 	nsize = est_size;
+    } else if (equals(c_token, "=")) {
+	/* array A = <expression> */
+	struct value a;
+	int save_token = ++c_token;
+	const_express(&a);
+	if (a.type != ARRAY) {
+	    free_value(&a);
+	    int_error(save_token, "not an array expression");
+	}
+	make_array_permanent(&a);
+	array->udv_value = a;
+	return;
     }
-    if (nsize <= 0)
+
+    if (nsize > 0)
+	init_array(array, nsize);
+    else
 	int_error(c_token-1, "expecting array[size>0]");
 
-    array->udv_value.v.value_array = gp_alloc((nsize+1) * sizeof(t_value), "array_command");
-    array->udv_value.type = ARRAY;
-
-    /* Element zero of the new array is not visible but contains the size */
+    /* Element zero can also hold an indicator that this is a colormap */
     A = array->udv_value.v.value_array;
-    A[0].v.int_val = nsize;
-    for (i = 0; i <= nsize; i++) {
-	A[i].type = NOTDEFINED;
+    if (equals(c_token, "colormap")) {
+	c_token++;
+	if (nsize >= 2)	/* Need at least 2 entries to calculate range */
+	    A[0].type = COLORMAP_ARRAY;
     }
 
     /* Initializer syntax:   array A[10] = [x,y,z,,"foo",] */
-    if (equals(c_token, "=")) {
+    if (equals(c_token, "=") && equals(c_token+1, "[")) {
 	int initializers = 0;
-	if (!equals(++c_token, "["))
-	    int_error(c_token, "expecting Array[size] = [x,y,...]");
-	c_token++;
+	c_token += 2;
 	for (i = 1; i <= nsize; i++) {
 	    if (equals(c_token, "]"))
 		break;
@@ -865,6 +953,12 @@ array_command()
 		continue;
 	    }
 	    const_express(&A[i]);
+	    if (A[i].type == ARRAY) {
+		if (A[i].v.value_array[0].type == TEMP_ARRAY)
+		    gpfree_array(&(A[i]));
+		A[i].type = NOTDEFINED;
+		int_error(c_token, "Cannot nest arrays");
+	    }
 	    initializers++;
 	    if (equals(c_token, "]"))
 		break;
@@ -875,7 +969,9 @@ array_command()
 	}
 	c_token++;
 	/* If the size is determined by the number of initializers */
-	if (A[0].v.int_val == 0)
+	if (empty_array)
+	    A[0].v.int_val = 0;
+	else if (A[0].v.int_val == 0)
 	    A[0].v.int_val = initializers;
     }
 
@@ -934,7 +1030,14 @@ is_array_assignment()
 
     /* Evaluate right side of assignment */
     c_token += 2;
-    (void) const_express(&newvalue);
+    const_express(&newvalue);
+    if (newvalue.type == ARRAY) {
+	if (newvalue.v.value_array[0].type == TEMP_ARRAY)
+	    gpfree_array(&newvalue);
+	newvalue.type = NOTDEFINED;
+	int_error(c_token, "Cannot nest arrays");
+    }
+    gpfree_string(&udv->udv_value.v.value_array[index]);
     udv->udv_value.v.value_array[index] = newvalue;
 
     return TRUE;
@@ -1039,24 +1142,6 @@ iteration_early_exit()
  * Command parser functions
  */
 
-/* process the 'call' command */
-void
-call_command()
-{
-    char *save_file = NULL;
-
-    c_token++;
-    save_file = try_to_get_string();
-
-    if (!save_file)
-	int_error(c_token, "expecting filename");
-    gp_expand_tilde(&save_file);
-
-    /* Argument list follows filename */
-    load_file(loadpath_fopen(save_file, "r"), save_file, 2);
-}
-
-
 /* process the 'cd' command */
 void
 changedir_command()
@@ -1104,6 +1189,12 @@ eval_command()
 {
     char *command;
     c_token++;
+#ifdef USE_FUNCTIONBLOCKS
+    if (equals(c_token, "$") && isletter(c_token+1) && equals(c_token+2,"(")) {
+	(void)int_expression();	/* throw away any actual return value */
+	return;
+    }
+#endif
     command = try_to_get_string();
     if (!command)
 	int_error(c_token, "Expected command string");
@@ -1155,7 +1246,10 @@ history_command()
 
 	/* find and show the entries */
 	c_token++;
-	m_capture(&search_str, c_token, c_token);  /* reallocates memory */
+	if (isstring(c_token))
+	    m_quote_capture(&search_str, c_token, c_token);
+	else
+	    m_capture(&search_str, c_token, c_token);
 	printf ("history ?%s\n", search_str);
 	if (!history_find_all(search_str))
 	    int_error(c_token,"not in history");
@@ -1170,7 +1264,10 @@ history_command()
 	    line_to_do = history_find_by_number(i);
 	} else {
 	    char *search_str = NULL;  /* string from command line to search for */
-	    m_capture(&search_str, c_token, c_token);
+	    if (isstring(c_token))
+		m_quote_capture(&search_str, c_token, c_token);
+	    else
+		m_capture(&search_str, c_token, c_token);
 	    line_to_do = history_find(search_str);
 	    free(search_str);
 	}
@@ -1238,155 +1335,150 @@ new_clause(int clause_start, int clause_end)
     return clause;
 }
 
-/* process the 'if' command */
+/*
+ * if / else command
+ *
+ * Aug 2020:
+ * Restructured to handle if / else if / else sequences in a single routine.
+ * Because the routine must handle recursion, the state flag (if_status)
+ * is made a parameter rather than a global.
+ */
+static void
+if_else_command(ifstate if_state)
+{
+    int clause_start, clause_end;
+    int next_token;
+
+    /* initial or recursive ("else if") if clause */
+    if (equals(c_token,"if")) {
+	struct at_type *expr;
+
+	if (!equals(++c_token, "("))
+	    int_error(c_token, "expecting (expression)");
+	/* advance past if condition whether or not we evaluate it */
+	expr = temp_at();
+	if (equals(c_token,"{")) {
+	    next_token = find_clause(&clause_start, &clause_end);
+	} else {
+	    /* pre-v5 syntax for "if" with no curly brackets */
+	    old_if_command(expr);
+	    return;
+	}
+	if (if_state == IF_TRUE) {
+	    /* This means we are here recursively in an "else if"
+	     * following an "if" clause that was already executed.
+	     * Skip both the expression and the bracketed clause.
+	     */
+	    c_token = next_token;
+	} else if (TRUE || if_state == IF_INITIAL) {
+	    struct value condition;
+	    evaluate_at(expr, &condition);
+	    if (real(&condition) == 0) {
+		if_state = IF_FALSE;
+		c_token = next_token;
+	    } else  {
+		char *clause;
+		if_state = IF_TRUE;
+		clause = new_clause(clause_start, clause_end);
+		begin_clause();
+		do_string_and_free(clause);
+		end_clause();
+		if (iteration_early_exit())
+		    c_token = num_tokens;
+		else
+		    c_token = next_token;
+	    }
+	} else {
+	    int_error(c_token, "unexpected if_state");
+	}
+    }
+
+    /* Done with "if" portion.  Check for "else" */
+    if (equals(c_token,"else")) {
+	c_token++;
+	if (equals(c_token,"if")) {
+	    if_else_command(if_state);
+	} else if (equals(c_token,"{")) {
+	    next_token = find_clause(&clause_start, &clause_end);
+	    if (if_state == IF_TRUE) {
+		c_token = next_token;
+	    } else {
+		char *clause;
+		if_state = IF_TRUE;
+		clause = new_clause(clause_start, clause_end);
+		begin_clause();
+		do_string_and_free(clause);
+		end_clause();
+		if (iteration_early_exit())
+		    c_token = num_tokens;
+		else
+		    c_token = next_token;
+	    }
+	    if_open_for_else = FALSE;
+	} else {
+	    int_error(c_token, "expecting bracketed else clause");
+	}
+    } else {
+	/* There was no "else" on this line but we might see it on another line */
+	if_open_for_else = !(if_state == IF_TRUE);
+    }
+
+    return;
+}
+
+/*
+ * The original if_command and else_command become wrappers
+ */
 void
 if_command()
 {
-    double exprval;
-    int end_token;
-
-    if (!equals(++c_token, "("))	/* no expression */
-	int_error(c_token, "expecting (expression)");
-    exprval = real_expression();
-
-    /*
-     * EAM May 2011
-     * New if {...} else {...} syntax can span multiple lines.
-     * Isolate the active clause and execute it recursively.
-     */
-    if (equals(c_token,"{")) {
-	/* Identify start and end position of the clause substring */
-	char *clause = NULL;
-	int if_start, if_end, else_start=0, else_end=0;
-	int clause_start, clause_end;
-
-	c_token = find_clause(&if_start, &if_end);
-
-	if (equals(c_token,"else")) {
-	    if (!equals(++c_token,"{"))
-		int_error(c_token,"expected {else-clause}");
-	    c_token = find_clause(&else_start, &else_end);
-	}
-	end_token = c_token;
-
-	if (exprval != 0) {
-	    clause_start = if_start;
-	    clause_end = if_end;
-	    if_condition = TRUE;
-	} else {
-	    clause_start = else_start;
-	    clause_end = else_end;
-	    if_condition = FALSE;
-	}
-	if_open_for_else = (else_start) ? FALSE : TRUE;
-
-	if (if_condition || else_start != 0) {
-	    clause = new_clause(clause_start, clause_end);
-	    begin_clause();
-	    do_string_and_free(clause);
-	    end_clause();
-	}
-
-	if (iteration_early_exit())
-	    c_token = num_tokens;
-	else
-	    c_token = end_token;
-
+	if_else_command(IF_INITIAL);
 	return;
-    }
-
-    /*
-     * EAM May 2011
-     * Old if/else syntax (no curly braces) affects the rest of the current line.
-     * Deprecate?
-     */
-    if (clause_depth > 0)
-	int_error(c_token,"Old-style if/else statement encountered inside brackets");
-    if_depth++;
-    if (exprval != 0.0) {
-	/* fake the condition of a ';' between commands */
-	int eolpos = token[num_tokens - 1].start_index + token[num_tokens - 1].length;
-	--c_token;
-	token[c_token].length = 1;
-	token[c_token].start_index = eolpos + 2;
-	gp_input_line[eolpos + 2] = ';';
-	gp_input_line[eolpos + 3] = NUL;
-
-	if_condition = TRUE;
-    } else {
-	while (c_token < num_tokens) {
-	    /* skip over until the next command */
-	    while (!END_OF_COMMAND) {
-		++c_token;
-	    }
-	    if (equals(++c_token, "else")) {
-		/* break if an "else" was found */
-		if_condition = FALSE;
-		--c_token; /* go back to ';' */
-		return;
-	    }
-	}
-	/* no else found */
-	c_token = num_tokens = 0;
-    }
 }
-
-/* process the 'else' command */
 void
 else_command()
 {
-    int end_token;
-   /*
-    * EAM May 2011
-    * New if/else syntax permits else clause to appear on a new line
-    */
-    if (equals(c_token+1,"{")) {
-	int clause_start, clause_end;
-	char *clause;
-
-	if (if_open_for_else)
-	    if_open_for_else = FALSE;
-	else
-	    int_error(c_token,"Invalid {else-clause}");
-
-	c_token++;	/* Advance to the opening curly brace */
-	end_token = find_clause(&clause_start, &clause_end);
-
-	if (!if_condition) {
-	    clause = new_clause(clause_start, clause_end);
-	    begin_clause();
-	    do_string_and_free(clause);
-	    end_clause();
-	}
-
-	if (iteration_early_exit())
-	    c_token = num_tokens;
-	else
-	    c_token = end_token;
-
-	return;
-    }
-
-
-   /* EAM May 2011
-    * The rest is only relevant to the old if/else syntax (no curly braces)
-    */
-    if (if_depth <= 0) {
-	int_error(c_token, "else without if");
-	return;
-    } else {
-	if_depth--;
-    }
-
-    if (TRUE == if_condition) {
-	/* First part of line was true so
-	 * discard the rest of the line. */
-	c_token = num_tokens = 0;
-    } else {
-	REPLACE_ELSE(c_token);
-	if_condition = TRUE;
-    }
+    if_else_command(if_open_for_else ? IF_FALSE : IF_TRUE);
+    return;
 }
+
+
+/*
+ * Old if/else syntax (no curly braces) is confined to a single input line.
+ * The rest of the line is *always* consumed.
+ */
+static void
+old_if_command(struct at_type *expr)
+{
+    struct value condition;
+    char *if_start, *if_end;
+    char *else_start = NULL;
+
+    if (clause_depth > 0)
+	int_error(c_token,"Old-style if/else statement encountered inside brackets");
+
+    evaluate_at(expr, &condition);
+
+    /* find start and end of the "if" part */
+    if_start = &gp_input_line[ token[c_token].start_index ];
+    while ((c_token < num_tokens) && !equals(c_token,"else"))
+	c_token++;
+
+    if (equals(c_token,"else")) {
+	if_end = &gp_input_line[ token[c_token].start_index - 1 ];
+	*if_end = '\0';
+	else_start = &gp_input_line[ token[c_token].start_index + token[c_token].length ];
+    }
+
+    if (real(&condition) != 0.0)
+	do_string(if_start);
+    else if (else_start)
+	do_string(else_start);
+
+    c_token = num_tokens = 0;		/* discard rest of line */
+}
+
+
 
 /* process commands of the form 'do for [i=1:N] ...' */
 void
@@ -1435,13 +1527,16 @@ do_command()
     } while (next_iteration(do_iterator));
     iteration_depth--;
 
+    /* FIXME:
+     * If any of the above exited via int_error() then this cleanup
+     * never happens and we leak memory for both clause and for the
+     * iterator itself.  But do_iterator cannot be static or global
+     * because do_command() can recurse.
+     */
     free(clause);
     end_clause();
     c_token = end_token;
 
-    /* FIXME:  If any of the above exited via int_error() then this	*/
-    /* cleanup never happens and we leak memory.  But do_iterator can	*/
-    /* not be static or global because do_command() can recurse.	*/
     do_iterator = cleanup_iteration(do_iterator);
     requested_break = FALSE;
     requested_continue = FALSE;
@@ -1566,7 +1661,7 @@ link_command()
 	    return;
 	else
 	    secondary_axis->linked_to_primary = NULL;
-	/* FIXME: could return here except for the need to free link_udf->at */
+	/* can't return yet because we need to free link_udf->at */
 	linked = FALSE;
     } else {
 	linked = TRUE;
@@ -1624,22 +1719,44 @@ link_command()
 	rrange_to_xy();
 }
 
-/* process the 'load' command */
 void
 load_command()
 {
-    /* These need to be local so that recursion works. */
-    /* They will eventually be freed by lf_pop(). */
-    FILE *fp;
-    char *save_file;
+    load_or_call_command( FALSE );
+}
 
+void
+call_command()
+{
+    load_or_call_command( TRUE );
+}
+
+/* The load and call commands are identical except that
+ * call may be followed by a bunch of command line arguments
+ */
+static void
+load_or_call_command( TBOOLEAN call )
+{
     c_token++;
-    save_file = try_to_get_string();
-    if (!save_file)
-	int_error(c_token, "expecting filename");
-    gp_expand_tilde(&save_file);
-    fp = strcmp(save_file, "-") ? loadpath_fopen(save_file, "r") : stdout;
-    load_file(fp, save_file, 1);
+    if (equals(c_token, "$") && isletter(c_token+1) && !equals(c_token+2,"[")) {
+	/* "load" a datablock rather than a file */
+	/* datablock_name will eventually be freed by lf_pop() */
+	char *datablock_name = gp_strdup(parse_datablock_name());
+	load_file(NULL, datablock_name, call ? 7 : 6);
+    } else {
+	/* These need to be local so that recursion works. */
+	/* They will eventually be freed by lf_pop(). */
+	FILE *fp;
+	char *save_file = try_to_get_string();
+	if (!save_file)
+	    int_error(c_token, "expecting filename");
+	gp_expand_tilde(&save_file);
+	if (!call && !strcmp(save_file, "-"))
+	    fp = stdout;
+	else
+	    fp = loadpath_fopen(save_file, "r");
+	load_file(fp, save_file, call ? 2 : 1);
+    }
 }
 
 
@@ -1712,6 +1829,84 @@ clause_reset_after_error()
     iteration_depth = 0;
 }
 
+/* "local" is a modifier for introduction of a variable.
+ * The scope of the local variable is determined by the depth of the lf_push
+ * operation preceding its occurance.
+ * If a variable of that name already exists it is saved internally to
+ * a new variable GPLOCAL_xxx_NAME, where NAME was the original name and xxx
+ * is the depth of the lf_push/pop stack in which the "local" declaration
+ * is encountered.
+ * The original variable will be restored by the corresponding lf_pop.
+ */
+void
+local_command()
+{
+    int array_token = 0;
+    struct udvt_entry *udv = NULL;
+
+    c_token++;
+    if (equals(c_token,"array"))
+	array_token = c_token++;
+
+    /* Has no effect if encountered at the top level */
+    if (lf_head) {
+	udv = add_udv(c_token);
+
+	/* Keep original value and clear it from its original location */
+	shadow_one_variable(udv);
+
+	/* flag that at least some local variables will go out of scope on lf_pop */
+	lf_head->local_variables = TRUE;
+    }
+
+    /* Create new local variable with this name */
+    if (array_token) {
+	c_token = array_token;
+	array_command();
+	if (udv && udv->udv_value.type == ARRAY)
+	    udv->udv_value.v.value_array[0].type = LOCAL_ARRAY;
+    } else {
+	define();
+    }
+}
+
+/* helper routine for local_command and for setting up the
+ * initial state of function block evaluation
+ */
+void
+shadow_one_variable(struct udvt_entry *udv)
+{
+    struct udvt_entry *save_udv;
+    struct value save_value;
+    int save_name_len;
+    char *save_name;
+
+    save_value = udv->udv_value;
+    udv->udv_value.type = NOTDEFINED;
+
+    /* Create a shadow variable to hold the original state */
+    save_name_len = strlen(udv->udv_name) + strlen("GPLOCAL_xxx_") + 1;
+    save_name = gp_alloc(save_name_len, NULL);
+    snprintf(save_name, save_name_len, "GPLOCAL_%03d_%s",
+	    lf_head->depth, udv->udv_name);
+    save_udv = add_udv_by_name(save_name);
+    free(save_name);
+
+    /* If this is a duplicate "local" instance at the same depth,
+     * the previous value at this depth is dropped.
+     */
+    if (save_udv->udv_value.type != NOTDEFINED) {
+	int_warn(NO_CARET, "Duplicate 'local' declaration for %s\n",
+		udv->udv_name);
+	free_value(&save_value);
+	return;
+    }
+    /* If there really was such a variable that is now shadowed,
+     * save its original value. Otherwise the saved state is NOTDEFINED.
+     */
+    save_udv->udv_value = save_value;
+}
+
 /* helper routine to multiplex mouse event handling with a timed pause command */
 void
 timed_pause(double sleep_time)
@@ -1737,11 +1932,14 @@ timed_pause(double sleep_time)
 void
 pause_command()
 {
-    int text = 0;
+    TBOOLEAN text = FALSE;
     double sleep_time;
     static char *buf = NULL;
 
     c_token++;
+
+   /*	Ignore pause commands in certain contexts to avoid bad behavior */
+   filter_multiplot_playback();
 
 #ifdef USE_MOUSE
     paused_for_mouse = 0;
@@ -1749,9 +1947,6 @@ pause_command()
 	sleep_time = -1;
 	c_token++;
 
-/*	EAM FIXME - This is not the correct test; what we really want */
-/*	to know is whether or not the terminal supports mouse feedback */
-/*	if (term_initialised) { */
 	if (mouse_setting.on && term) {
 	    struct udvt_entry *current;
 	    int end_condition = 0;
@@ -1791,37 +1986,34 @@ pause_command()
 	    Ginteger(&current->udv_value,-1);
 	    current = add_udv_by_name("MOUSE_BUTTON");
 	    Ginteger(&current->udv_value,-1);
-	} else
+	} else {
 	    int_warn(NO_CARET, "Mousing not active");
+	    while (!END_OF_COMMAND) c_token++;
+	}
     } else
 #endif
 	sleep_time = real_expression();
 
     if (END_OF_COMMAND) {
 	free(buf); /* remove the previous message */
-	buf = gp_strdup("paused"); /* default message, used in Windows GUI pause dialog */
+	buf = gp_strdup("paused"); /* default message, used in GUI pause dialog */
     } else {
 	char *tmp = try_to_get_string();
 	if (!tmp)
 	    int_error(c_token, "expecting string");
 	else {
+	    free(buf);
+	    buf = tmp;
 #ifdef _WIN32
-	    free(buf);
-	    buf = tmp;
-	    if (sleep_time >= 0) {
+	    if (sleep_time >= 0)
 		fputs(buf, stderr);
-	    }
 #elif defined(OS2)
-	    free(buf);
-	    buf = tmp;
 	    if (strcmp(term->name, "pm") != 0 || sleep_time >= 0)
 		fputs(buf, stderr);
 #else /* Not _WIN32 or OS2 */
-	    free(buf);
-	    buf = tmp;
 	    fputs(buf, stderr);
 #endif
-	    text = 1;
+	    text = TRUE;
 	}
     }
 
@@ -1833,14 +2025,19 @@ pause_command()
 	    int junk = 0;
 	    if (buf) {
 		/* Use of fprintf() triggers a bug in MinGW + SJIS encoding */
-		fputs(buf, stderr); fputs("\n", stderr);
+		fputs(buf, stderr); fputc('\n', stderr);
 	    }
-	    /* cannot use EAT_INPUT_WITH here */
-	    do {
-		junk = getch();
-		if (ctrlc_flag)
-		    bail_to_command_line();
-	    } while (junk != EOF && junk != '\n' && junk != '\r');
+	    /* Note: cannot use EAT_INPUT_WITH here
+	     * FIXME: probably term->waitforinput is always correct, not just for qt
+	     */
+	    if (!strcmp(term->name,"qt"))
+		term->waitforinput(0);
+	    else
+		do {
+		    junk = getch();
+		    if (ctrlc_flag)
+			bail_to_command_line();
+		} while (junk != EOF && junk != '\n' && junk != '\r');
 	} else /* paused_for_mouse */
 # endif /* !WGP_CONSOLE */
 	{
@@ -1848,30 +2045,56 @@ pause_command()
 		bail_to_command_line();
 	}
 #elif defined(OS2) && defined(USE_MOUSE)
-	if (isatty(fileno(stdin)) && strcmp(term->name, "pm") == 0) {
-	    int rc = PM_pause(buf);
-	    if (rc == 0) {
-		/* if (!CallFromRexx)
-		 * would help to stop REXX programs w/o raising an error message
-		 * in RexxInterface() ...
-		 */
-		bail_to_command_line();
-	    } else if (rc == 2) {
-		fputs(buf, stderr);
-		text = 1;
-		EAT_INPUT_WITH(fgetc(stdin));
+	if ((strcmp(term->name, "pm") == 0) || (strcmp(term->name, "x11") == 0)) {
+	    ULONG u;
+
+	    if (paused_for_mouse &&
+		/* only pause for mouse if window is actually open */
+		((strcmp(term->name, "pm") != 0) || PM_is_connected())) {
+		/* Only print a message if there is one given on the command line. */
+		if (text) fputs(buf, stderr);
+		while (paused_for_mouse) {
+		    /* wait for mouse event */
+		    DosWaitEventSem(semInputReady, SEM_INDEFINITE_WAIT);
+		    DosResetEventSem(semInputReady, &u);
+		    os2_ipc_dispatch_event();
+		}
+		if (text) fputc('\n', stderr);
+	    } else {
+		/* If input is redirected or if the x11 terminal is active,
+		   we don't use a dialog/menu for pausing. */
+		pause_internal = !isatty(fileno(stdin)) || (strcmp(term->name, "x11") == 0);
+		thread_pause_RetCode =  -1;
+		_beginthread(thread_pause, NULL, 32768, text ? buf : NULL);
+		do {
+		    /* wait until pause is done or gnupmdrv makes shared mem available */
+		    DosWaitEventSem(semInputReady, SEM_INDEFINITE_WAIT);
+		    DosResetEventSem(semInputReady, &u);
+		    if (thread_pause_RetCode < 0)
+			os2_ipc_dispatch_event();
+		} while (thread_pause_RetCode < 0);
+		if (!isatty(fileno(stdin)) && text)
+		    fputc('\n', stderr);
+		if (thread_pause_RetCode == 0) {
+		    /* if (!CallFromRexx)
+		     * would help to stop REXX programs w/o raising an error message
+		     * in RexxInterface() ...
+		     */
+		    bail_to_command_line();
+		}
 	    }
 	} else {
-	    if (strcmp(term->name, "pm") == 0)
-		fputs(buf, stderr);
+	    /* NOT x11 or pm terminal, so need to handle mouse events,
+	       just wait for input */
 	    EAT_INPUT_WITH(fgetc(stdin));
 	    fputc('\n', stderr);
 	}
 #else /* !(_WIN32 || OS2) */
 # ifdef USE_MOUSE
 	if (term && term->waitforinput) {
-	    /* It does _not_ work to do EAT_INPUT_WITH(term->waitforinput()) */
-	    term->waitforinput(0);
+	    int terminating_char = term->waitforinput(0);
+	    if (isalnum(terminating_char))
+		ungetc(terminating_char, stdin);
 	} else
 # endif /* USE_MOUSE */
 # ifdef MSDOS
@@ -1901,7 +2124,7 @@ pause_command()
     if (sleep_time > 0)
 	timed_pause(sleep_time);
 
-    if (text != 0 && sleep_time >= 0)
+    if (text && sleep_time >= 0)
 	fputc('\n', stderr);
     screen_ok = FALSE;
 
@@ -1915,6 +2138,7 @@ plot_command()
     plot_token = c_token++;
     plotted_data_from_stdin = FALSE;
     refresh_nplots = 0;
+    plot_iterator = cleanup_iteration(plot_iterator);
     SET_CURSOR_WAIT;
 #ifdef USE_MOUSE
     plot_mode(MODE_PLOT);
@@ -1927,10 +2151,14 @@ plot_command()
     add_udv_by_name("MOUSE_ALT")->udv_value.type = NOTDEFINED;
     add_udv_by_name("MOUSE_CTRL")->udv_value.type = NOTDEFINED;
 #endif
+    if (evaluate_inside_functionblock && inside_plot_command)
+	int_error(NO_CARET, "plot command not available in this context");
+    inside_plot_command = TRUE;
     plotrequest();
     /* Clear "hidden" flag for any plots that may have been toggled off */
     if (term->modify_plots)
 	term->modify_plots(MODPLOTS_SET_VISIBLE, -1);
+    inside_plot_command = FALSE;
     SET_CURSOR_ARROW;
 }
 
@@ -1983,21 +2211,28 @@ print_set_output(char *name, TBOOLEAN datablock, TBOOLEAN append_p)
 	    return;
 	}
     } else {
-	print_out_var = add_udv_by_name(name);
-	if (print_out_var == NULL) {
-	    fprintf(stderr, "Error allocating datablock \"%s\"\n", name);
-	    return;
+	/* Make sure we will not overwrite the current input. */
+	if (called_from(name)) {
+	    free(name);
+	    int_error(NO_CARET, "print output must not overwrite input");
 	}
-	if (print_out_var->udv_value.type != NOTDEFINED) {
-	    gpfree_string(&print_out_var->udv_value);
-	    if (!append_p)
-		gpfree_datablock(&print_out_var->udv_value);
-	    if (print_out_var->udv_value.type != DATABLOCK)
-		print_out_var->udv_value.v.data_array = NULL;
-	} else {
+
+	/* We already know the name begins with $,
+	 * so the udv is either a new empty variable (no need to clear)
+	 * an existing datablock (append or clear according to flag)
+	 * or (probably by mistake) a voxel grid (clear before use).
+	 */
+	print_out_var = add_udv_by_name(name);
+	if (!append_p) {
+	    gpfree_datablock(&print_out_var->udv_value);
+	    gpfree_functionblock(&print_out_var->udv_value);
+	}
+	if (print_out_var->udv_value.type != DATABLOCK) {
+	    free_value(&print_out_var->udv_value);
+	    gpfree_vgrid(print_out_var);
+	    print_out_var->udv_value.type = DATABLOCK;
 	    print_out_var->udv_value.v.data_array = NULL;
 	}
-	print_out_var->udv_value.type = DATABLOCK;
     }
 
     print_out_name = name;
@@ -2034,8 +2269,11 @@ void
 print_command()
 {
     struct value a;
-    /* space is not needed for the first entry */
+    int save_token;
+
+    /* field separator is not needed for the first entry */
     TBOOLEAN need_space = FALSE;
+    char *field_sep = print_sep ? print_sep : " ";
 
     char *dataline = NULL;
     size_t size = 256;
@@ -2050,9 +2288,28 @@ print_command()
     screen_ok = FALSE;
     do {
 	++c_token;
-	if (equals(c_token, "$") && isletter(c_token+1) && !equals(c_token+2,"[")) {
+	if (equals(c_token, "$") && isletter(c_token+1)
+	&&  !equals(c_token+2,"[") && !equals(c_token+2,"(")) {
+	    char **line;
 	    char *datablock_name = parse_datablock_name();
-	    char **line = get_datablock(datablock_name);
+	    struct udvt_entry *block = get_udv_by_name(datablock_name);
+
+	    if (!block)
+		int_error(c_token, "no block named %s", datablock_name);
+#ifdef USE_FUNCTIONBLOCKS
+	    if (block->udv_value.type == FUNCTIONBLOCK
+	    &&  (print_out_var == NULL)) {
+		line = block->udv_value.v.functionblock.parnames;
+		fprintf(print_out, "function %s( ", datablock_name);
+		while (line && *line) {
+		    fprintf(print_out, "%s ", *line);
+		    line++;
+		}
+		fprintf(print_out, ")\n");
+		line = block->udv_value.v.functionblock.data_array;
+	    } else
+#endif	/* USE_FUNCTIONBLOCKS */
+		line = block->udv_value.v.data_array;
 
 	    /* Printing a datablock into itself would cause infinite recursion */
 	    if (print_out_var && !strcmp(datablock_name, print_out_name))
@@ -2071,17 +2328,39 @@ print_command()
 	    continue;
 	}
 
+	/* Prepare for possible iteration */
+	save_token = c_token;
+	print_iterator = check_for_iteration();
+	if (empty_iteration(print_iterator)) {
+	    const_express(&a);
+	    print_iterator = cleanup_iteration(print_iterator);
+	    continue;
+	}
+	if (forever_iteration(print_iterator)) {
+	    print_iterator = cleanup_iteration(print_iterator);
+	    int_error(save_token, "unbounded iteration not accepted here");
+	}
+	save_token = c_token;
+	ITERATE:
+
 	/* All entries other than the first one on a line */
 	if (need_space) {
 	    if (dataline != NULL)
-		len = strappend(&dataline, &size, len, " ");
+		len = strappend(&dataline, &size, len, field_sep);
 	    else
-		fputs(" ", print_out);
+		fputs(field_sep, print_out);
 	}
 	need_space = TRUE;
 
-	if (type_udv(c_token) == ARRAY && !equals(c_token+1, "[")) {
-	    struct value *array = add_udv(c_token++)->udv_value.v.value_array;
+	const_express(&a);
+	if (a.type == STRING) {
+	    if (dataline != NULL)
+		len = strappend(&dataline, &size, len, a.v.string_val);
+	    else
+		fputs(a.v.string_val, print_out);
+	    gpfree_string(&a);
+	} else if (a.type == ARRAY) {
+	    struct value *array = a.v.value_array;
 	    if (dataline != NULL) {
 		int i;
 		int arraysize = array[0].v.int_val;
@@ -2096,28 +2375,32 @@ print_command()
 	    } else {
 		save_array_content(print_out, array);
 	    }
-	    continue;
-	}
-	const_express(&a);
-	if (a.type == STRING) {
-	    if (dataline != NULL)
-		len = strappend(&dataline, &size, len, a.v.string_val);
-	    else
-		fputs(a.v.string_val, print_out);
-	    gpfree_string(&a);
+	    if (array[0].type == TEMP_ARRAY)
+		gpfree_array(&a);
+	    a.type = NOTDEFINED;
 	} else {
 	    if (dataline != NULL)
 		len = strappend(&dataline, &size, len, value_to_str(&a, FALSE));
 	    else
 		disp_value(print_out, &a, FALSE);
 	}
+	/* Any other value types besides STRING and ARRAY that need memory freed? */
+
+	if (next_iteration(print_iterator)) {
+	    c_token = save_token;
+	    goto ITERATE;
+	} else {
+	    print_iterator = cleanup_iteration(print_iterator);
+	}
 
     } while (!END_OF_COMMAND && equals(c_token, ","));
 
-    if (dataline != NULL) {
+    if (dataline) {
+	if (print_out_var == NULL)
+	    int_error(NO_CARET, "print destination was clobbered");
 	append_multiline_to_datablock(&print_out_var->udv_value, dataline);
     } else {
-	(void) putc('\n', print_out);
+	putc('\n', print_out);
 	fflush(print_out);
     }
 }
@@ -2155,6 +2438,9 @@ void
 refresh_request()
 {
     AXIS_INDEX axis;
+    if (evaluate_inside_functionblock && inside_plot_command)
+	int_error(NO_CARET, "refresh command not available in this context");
+    inside_plot_command = TRUE;
 
     if (   ((first_plot == NULL) && (refresh_ok == E_REFRESH_OK_2D))
 	|| ((first_3dplot == NULL) && (refresh_ok == E_REFRESH_OK_3D))
@@ -2192,7 +2478,7 @@ refresh_request()
 	if (this_axis->linked_to_secondary)
 	    clone_linked_axes(this_axis, this_axis->linked_to_secondary);
 	else if (this_axis->linked_to_primary) {
-	    if (this_axis->linked_to_primary->autoscale != AUTOSCALE_BOTH)
+	    if ((this_axis->linked_to_primary->autoscale & AUTOSCALE_BOTH) != AUTOSCALE_BOTH)
 	    clone_linked_axes(this_axis, this_axis->linked_to_primary);
 	}
     }
@@ -2208,6 +2494,7 @@ refresh_request()
     } else
 	int_error(NO_CARET, "Internal error - refresh of unknown plot type");
 
+    inside_plot_command = FALSE;
 }
 
 /* process the 'replot' command */
@@ -2239,7 +2526,13 @@ replot_command()
     SET_CURSOR_WAIT;
     if (term->flags & TERM_INIT_ON_REPLOT)
 	term->init();
-    replotrequest();
+
+    /* EXPERIMENTAL */
+    if (last_plot_was_multiplot && !multiplot)
+	replay_multiplot();
+    else
+	replotrequest();
+
     SET_CURSOR_ARROW;
 }
 
@@ -2248,13 +2541,42 @@ replot_command()
 void
 reread_command()
 {
-    FILE *fp = lf_top();
-
+#ifdef BACKWARD_COMPATIBILITY
+    FILE *fp;
+    c_token++;
+    if (evaluate_inside_functionblock || multiplot || multiplot_playback)
+	int_error(NO_CARET, "reread command not possible here");
+    fp = lf_top();
     if (fp != (FILE *) NULL)
 	rewind(fp);
-    c_token++;
+#else
+    int_error(c_token, "deprecated command");
+#endif
 }
 
+#ifdef USE_FUNCTIONBLOCKS
+/* 'return <expression>' clears or sets a return value and then acts
+ * like 'exit' to return to the caller immediately.  The only way that
+ * anything sees the return value is if the 'return' statement is
+ * executed inside a function block.
+ */
+void
+return_command()
+{
+    c_token++;
+    gpfree_string(&eval_return_value);
+    if (!END_OF_COMMAND) {
+	const_express(&eval_return_value);
+	if (eval_return_value.type == ARRAY) {
+	    make_array_permanent(&eval_return_value);
+	    eval_return_value.v.value_array[0].type = TEMP_ARRAY;
+	}
+    }
+    command_exit_requested = 1;
+}
+#else	/* USE_FUNCTIONBLOCKS */
+void return_command() {}
+#endif	/* USE_FUNCTIONBLOCKS */
 
 /* process the 'save' command */
 void
@@ -2262,6 +2584,7 @@ save_command()
 {
     FILE *fp;
     char *save_file = NULL;
+    TBOOLEAN append = FALSE;
     int what;
 
     c_token++;
@@ -2273,6 +2596,7 @@ save_command()
 	case SAVE_TERMINAL:
 	case SAVE_VARS:
 	case SAVE_FIT:
+	case SAVE_DATABLOCKS:
 	    c_token++;
 	    break;
 	default:
@@ -2281,7 +2605,11 @@ save_command()
 
     save_file = try_to_get_string();
     if (!save_file)
-	    int_error(c_token, "expecting filename");
+	int_error(c_token, "expecting filename");
+    if (equals(c_token, "append")) {
+	append = TRUE;
+	c_token++;
+    }
 #ifdef PIPES
     if (save_file[0]=='|') {
 	restrict_popen();
@@ -2291,9 +2619,11 @@ save_command()
     {
     gp_expand_tilde(&save_file);
 #ifdef _WIN32
-    fp = strcmp(save_file,"-") ? loadpath_fopen(save_file,"w") : stdout;
+    fp = !strcmp(save_file,"-") ? stdout
+	: loadpath_fopen(save_file, append?"a":"w");
 #else
-    fp = strcmp(save_file,"-") ? fopen(save_file,"w") : stdout;
+    fp = !strcmp(save_file,"-") ? stdout
+	: fopen(save_file, append?"a":"w");
 #endif
     }
 
@@ -2301,7 +2631,7 @@ save_command()
 	os_error(c_token, "Cannot open save file");
 
     switch (what) {
-	case SAVE_FUNCS:
+    case SAVE_FUNCS:
 	    save_functions(fp);
 	break;
     case SAVE_SET:
@@ -2315,6 +2645,9 @@ save_command()
 	break;
     case SAVE_FIT:
 	    save_fit(fp);
+	break;
+    case SAVE_DATABLOCKS:
+	    save_datablocks(fp);
 	break;
     default:
 	    save_all(fp);
@@ -2347,11 +2680,16 @@ screendump_command()
 
 
 /* set_command() is in set.c */
-
-/* 'shell' command is processed by do_shell(), see below */
-
 /* show_command() is in show.c */
 
+/* 'shell' command is processed by do_shell(), see below */
+void
+shell_command()
+{
+    if (evaluate_inside_functionblock)
+	int_error(NO_CARET, "bare shell commands not accepted in a function block");
+    do_shell();
+}
 
 /* process the 'splot' command */
 void
@@ -2360,6 +2698,7 @@ splot_command()
     plot_token = c_token++;
     plotted_data_from_stdin = FALSE;
     refresh_nplots = 0;
+    plot_iterator = cleanup_iteration(plot_iterator);
     SET_CURSOR_WAIT;
 #ifdef USE_MOUSE
     plot_mode(MODE_SPLOT);
@@ -2369,10 +2708,14 @@ splot_command()
     add_udv_by_name("MOUSE_Y2")->udv_value.type = NOTDEFINED;
     add_udv_by_name("MOUSE_BUTTON")->udv_value.type = NOTDEFINED;
 #endif
+    if (evaluate_inside_functionblock && inside_plot_command)
+	int_error(NO_CARET, "splot command not available in this context");
+    inside_plot_command = TRUE;
     plot3drequest();
     /* Clear "hidden" flag for any plots that may have been toggled off */
     if (term->modify_plots)
 	term->modify_plots(MODPLOTS_SET_VISIBLE, -1);
+    inside_plot_command = FALSE;
     SET_CURSOR_ARROW;
 }
 
@@ -2381,7 +2724,11 @@ void
 stats_command()
 {
 #ifdef USE_STATS
+    if (evaluate_inside_functionblock && inside_plot_command)
+	int_error(NO_CARET, "stats command not available in this context");
+    inside_plot_command = TRUE;
     statsrequest();
+    inside_plot_command = FALSE;
 #else
     int_error(NO_CARET,"This copy of gnuplot was not configured with support for the stats command");
 #endif
@@ -2456,8 +2803,7 @@ $PALETTE u 1:2 t 'red' w l lt 1 lc rgb 'red',\
 
     /* Store R/G/B/Int curves in a datablock */
     datablock = add_udv_by_name("$PALETTE");
-    if (datablock->udv_value.type != NOTDEFINED)
-	gpfree_datablock(&datablock->udv_value);
+    free_value(&datablock->udv_value);
     datablock->udv_value.type = DATABLOCK;
     datablock->udv_value.v.data_array = NULL;
 
@@ -2492,6 +2838,7 @@ $PALETTE u 1:2 t 'red' w l lt 1 lc rgb 'red',\
      * for our temporary testing plot.
      */
     save_set(f);
+    save_pixmaps(f);
 
     /* execute all commands from the temporary file */
     rewind(f);
@@ -2676,7 +3023,7 @@ changedir(char *path)
     if (isalpha((unsigned char)path[0]) && (path[1] == ':')) {
 	int driveno = toupper((unsigned char)path[0]) - 'A';	/* 0=A, 1=B, ... */
 
-# if defined(__EMX__) || defined(__WATCOMC__)
+# if defined(__WATCOMC__)
 	(void) _chdrive(driveno + 1);
 # elif defined(__DJGPP__)
 	(void) setdisk(driveno);
@@ -2791,15 +3138,6 @@ struct dsc$descriptor_s line_desc =
 
 $DESCRIPTOR(help_desc, Help);
 $DESCRIPTOR(helpfile_desc, "GNUPLOT$HELP");
-
-/* HBB 990829: confirmed this to be used on VMS, only --> moved into
- * the VMS-specific section */
-void
-done(int status)
-{
-    term_reset();
-    gp_exit(status);
-}
 
 /* VMS-only version of read_line */
 static int
@@ -3326,7 +3664,7 @@ do_shell()
 /* read from stdin, everything except VMS */
 
 # ifndef USE_READLINE
-#  if defined(MSDOS) && !defined(__EMX__) && !defined(__DJGPP__)
+#  if defined(MSDOS) && !defined(__DJGPP__)
 
 /* if interactive use console IO so CED will work */
 
@@ -3535,10 +3873,13 @@ expand_1level_macros()
     for (c=temp_string; len && c && *c; c++, len--) {
 	switch (*c) {
 	case '@':	/* The only tricky bit */
-		if (!in_squote && !in_dquote && !in_comment && isalpha((unsigned char)c[1])) {
+		if (!in_squote && !in_dquote && !in_comment
+			&& (isalpha((unsigned char)c[1]) || ALLOWED_8BITVAR(c[1]))) {
 		    /* Isolate the udv key as a null-terminated substring */
 		    m = ++c;
-		    while (isalnum((unsigned char )*c) || (*c=='_')) c++;
+		    while (isalnum((unsigned char )*c) || (*c=='_')
+			|| ALLOWED_8BITVAR(*c))
+			c++;
 		    temp_char = *c; *c = '\0';
 		    /* Look up the key and restore the original following char */
 		    udv = get_udv_by_name(m);

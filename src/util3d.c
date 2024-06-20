@@ -845,7 +845,7 @@ map3d_xyz(
     double x, double y, double z,		/* user coordinates */
     p_vertex out)
 {
-    int i, j;
+    int i;
     double V[4], Res[4];	/* Homogeneous coords. vectors. */
 
     /* Normalize object space to -1..1 */
@@ -856,9 +856,10 @@ map3d_xyz(
 
     /* Res[] = V[] * trans_mat[][] (uses row-vectors) */
     for (i = 0; i < 4; i++) {
-	Res[i] = trans_mat[3][i];		/* V[3] is 1. anyway */
-	for (j = 0; j < 3; j++)
-	    Res[i] += V[j] * trans_mat[j][i];
+	Res[i] = trans_mat[3][i];		/* V[3] is always 1. */
+	Res[i] += V[0] * trans_mat[0][i];
+	Res[i] += V[1] * trans_mat[1][i];
+	Res[i] += V[2] * trans_mat[2][i];
     }
 
     if (Res[3] == 0)
@@ -905,16 +906,12 @@ draw3d_point_unconditional(p_vertex v, struct lp_style_type *lp)
     int x, y;
 
     TERMCOORD(v, x, y);
-    /* Jul 2010 EAM - is it safe to overwrite like this? Make a copy instead? */
     lp->pm3d_color.value = v->real_z;
     term_apply_lp_properties(lp);
     if (!clip_point(x, y))
 	(term->point) (x, y, lp->p_type);
 }
 
-/* Moved this upward, to make optional inlining in draw3d_line easier
- * for compilers */
-/* HBB 20021128: removed GP_INLINE qualifier to avoid MSVC++ silliness */
 void
 draw3d_line_unconditional(
     p_vertex v1, p_vertex v2,

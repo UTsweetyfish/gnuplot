@@ -1,7 +1,7 @@
 /* config.hin.  Generated from configure.ac by autoheader.  */
 
-/* Define if you want online help and subtopic tables sorted by column. */
-#undef COLUMN_HELP
+/* Define to allow use of some deprecated syntax. */
+#undef BACKWARD_COMPATIBILITY
 
 /* Define to treat spacebar like any other keystroke. */
 #undef DISABLE_SPACE_RAISES_CONSOLE
@@ -30,6 +30,9 @@
 /* Define if you want to use a newer version of libgrx under MSDOS/djgpp. */
 #undef GRX21
 
+/* define if you have a library of Amos special functions */
+#undef HAVE_AMOS
+
 /* Define to 1 if you have the `atexit' function. */
 #undef HAVE_ATEXIT
 
@@ -39,11 +42,32 @@
 /* Define to 1 if you have the `bzero' function. */
 #undef HAVE_BZERO
 
+/* Define to 1 if you have the `cabs' function. */
+#undef HAVE_CABS
+
 /* libcairo support for eps (cairo >= 1.6) */
 #undef HAVE_CAIROEPS
 
 /* Define if you want the cairo-based terminals. */
 #undef HAVE_CAIROPDF
+
+/* Define to 1 if you have the `cbrt' function. */
+#undef HAVE_CBRT
+
+/* define if you have Amos function cexint */
+#undef HAVE_CEXINT
+
+/* Define to 1 if you have the `cexp' function. */
+#undef HAVE_CEXP
+
+/* Define to 1 if you have the `clog' function. */
+#undef HAVE_CLOG
+
+/* Define to 1 if you have the <complex.h> header file. */
+#undef HAVE_COMPLEX_H
+
+/* Define to 1 if you have the `csqrt' function. */
+#undef HAVE_CSQRT
 
 /* Define to 1 if you have the declaration of `signgam', and to 0 if you
    don't. */
@@ -79,6 +103,9 @@
 /* Define to 1 if you have the `fdopen' function. */
 #undef HAVE_FDOPEN
 
+/* Define to 1 if you have the <fenv.h> header file. */
+#undef HAVE_FENV_H
+
 /* Define to 1 if you have the <float.h> header file. */
 #undef HAVE_FLOAT_H
 
@@ -112,11 +139,8 @@
 /* Define to 1 if you have the `getcwd' function. */
 #undef HAVE_GETCWD
 
-/* Define to 1 if you have the <ggi/wmh.h> header file. */
-#undef HAVE_GGI_WMH_H
-
-/* Define to 1 if you have the <ggi/xmi.h> header file. */
-#undef HAVE_GGI_XMI_H
+/* Define to 1 if you have the `gnu_get_libc_version' function. */
+#undef HAVE_GNU_GET_LIBC_VERSION
 
 /* Define to include support for gpic terminal */
 #undef HAVE_GPIC
@@ -193,8 +217,14 @@
 /* Define to 1 if you have the `memset' function. */
 #undef HAVE_MEMSET
 
-/* Define to include support for mif terminal */
-#undef HAVE_MIF
+/* Define to 1 if you have the `mergesort' function. */
+#undef HAVE_MERGESORT
+
+/* Define to include support for metafont terminal */
+#undef HAVE_METAFONT
+
+/* Define to include support for metapost terminal */
+#undef HAVE_METAPOST
 
 /* Define to 1 if you have the <minix/config.h> header file. */
 #undef HAVE_MINIX_CONFIG_H
@@ -403,6 +433,9 @@
 /* Define to 1 if you have the `wcwidth' function. */
 #undef HAVE_WCWIDTH
 
+/* Define to build the webp terminal. */
+#undef HAVE_WEBP
+
 /* Define to 1 if `fork' works. */
 #undef HAVE_WORKING_FORK
 
@@ -490,18 +523,17 @@
    old caca_export_memory */
 #undef USE_CACA_EXPORT_MEMORY
 
-/* Define if you want to read .gnuplot from current directory (SECURITY
-   RISK!). */
-#undef USE_CWDRC
-
-/* Define this to build the General Graphics Interface (ggi) driver. */
-#undef USE_GGI_DRIVER
+/* Define to support defining a function as a here document */
+#undef USE_FUNCTIONBLOCKS
 
 /* Define if gnuplot_x11 can use KDE3 DCOP to raise konsole */
 #undef USE_KDE3_DCOP
 
 /* Define if you have interactive terminals that use mouse support. */
 #undef USE_MOUSE
+
+/* Define to support polar gridded surface plots */
+#undef USE_POLAR_GRID
 
 /* Define to add support for generating a statistical summary of data */
 #undef USE_STATS
@@ -594,6 +626,9 @@
 #endif
 
 
+/* Define to support setting watchpoints in 2D plots */
+#undef USE_WATCHPOINTS
+
 /* Define to enable multi-byte font support for x11 */
 #undef USE_X11_MULTIBYTE
 
@@ -602,6 +637,15 @@
 
 /* The main version number */
 #undef VERSION_MAJOR
+
+/* Define to support Delaunay triangulation and chi-shapes */
+#undef WITH_CHI_SHAPES
+
+/* Define to make use of otherwise empty space in struct coordinate */
+#undef WITH_EXTRA_COORDINATE
+
+/* Define if qsort on your O/S is unstable and that bothers you. */
+#undef WITH_STABLE_SORT
 
 /* Define to include support for tektronix terminal emulators */
 #undef WITH_TEKTRONIX

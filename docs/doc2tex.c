@@ -68,8 +68,10 @@ void finish(FILE *);
 static TBOOLEAN intable = FALSE;
 static TBOOLEAN verb = FALSE;
 static TBOOLEAN see = FALSE;
+static TBOOLEAN ja_see = FALSE;
 static TBOOLEAN inhref = FALSE;
 static TBOOLEAN figures = FALSE;
+static TBOOLEAN japanese = FALSE;
 
 int
 main (int argc, char **argv)
@@ -78,16 +80,27 @@ main (int argc, char **argv)
     FILE *outfile;
 
     int inarg = 1;
+    int i = 0;
 
     infile = stdin;
     outfile = stdout;
 
-    if (argc > 1 && !strcmp(argv[1],"-figures")) {
-	figures = TRUE;
-	inarg = 2;
+    for (i=1; i<argc; i++) {
+	if (!strncmp(argv[i],"-japanese",3)) {
+	    japanese = TRUE;
+	    inarg++;
+	    termtext = termtext_ja;
+	}
     }
 
-    if (argc > (figures ? 4 : 3)) {
+    for (i=1; i<argc; i++) {
+	if (!strcmp(argv[i],"-figures")) {
+	    figures = TRUE;
+	    inarg++;
+	}
+    }
+
+    if (argc > (inarg + 2)) {
 	fprintf(stderr, "Usage: %s [-figures] [infile [outfile]]\n", argv[0]);
 	exit(EXIT_FAILURE);
     }
@@ -143,16 +156,18 @@ process_line( char *line, FILE *b)
                                 /* convert '?xxx' to '\label{xxx}' */
 	    if (line[1] == '?')
 		break;
+	    if (line[1] == '\0' || strlen(line)<3)
+		break;
 	    line[strlen(line)-1]=NUL;
             (void) fputs("\\label{",b);
 	    fputs(line+1, b);
-            (void) fputs("}\n",b);
+            (void) fputs("}%\n",b);
 	    if (!strpbrk(line+1," ")) {	/* Make an index entry also */
 		(void) fputs("\\index{",b);
 		while ((ind = strpbrk(line+1,"-_")))
 		    *ind = ' ';
 		fputs(line+1, b);
-		(void) fputs("}\n",b);
+		(void) fputs("}%\n",b);
 	    }
 	    break;		/* ignore */ /* <- don't ignore */
 
@@ -162,17 +177,20 @@ process_line( char *line, FILE *b)
 	    while ((ind = strpbrk(line+1,"-_")))
 		*ind = ' ';
 	    fputs(line+1, b);
-	    (void) fputs("}\n",b);
+	    (void) fputs("}%\n",b);
 	    break;
 
     case 'F':			/* embedded figure */
 	    if (figures) {
 		line[strlen(line)-1]=NUL;
-		(void) fputs("\\parpic[r][rt]{\\includegraphics[width=3in,keepaspectratio]{",b);
+		(void) fputs("\\gpinsetfigure{",b);
 		fputs(line+1, b);
-		(void) fputs("}}\n",b);
+		(void) fputs("}\n",b);
 	    }
 	    break;
+
+    case 'D':			/* link to demo figure */
+	    break;		/* ignore */
 
     case '@':{			/* start/end table */
 	    if (intable) {
@@ -214,7 +232,7 @@ process_line( char *line, FILE *b)
 		}
 		else if (!strncmp(line+1,"TeX",3)) {
 		    /* Treat rest of line as LaTeX command */
-		    fprintf(b, "%s\n", line + 5);
+		    fprintf(b, "%s ", line + 5);
 		}
 		else {
 		    if (strchr(line, '\n'))
@@ -457,7 +475,16 @@ puttex( char *str, FILE *file)
     static TBOOLEAN inquote = FALSE;
     int i;
 
-    while ((ch = *str++) != NUL) {
+    while ((ch = *str) != NUL) {
+
+	/* Japanese documentation trigger for cross-reference link */
+	if (!strncmp( str, "参照", strlen("参照") ))
+	    ja_see = TRUE;
+	if (!strncmp( str, "。", strlen("。") ))
+	    ja_see = FALSE;
+
+	str++;
+
 	switch (ch) {
 	case '#':
 	case '$':
@@ -505,7 +532,7 @@ puttex( char *str, FILE *file)
 	    break;
 	case '`':    /* backquotes mean boldface */
 	    if (inquote) {
-                if (see){
+                if ((see || ja_see) && (*string != '$')) {
 		    char *index = string;
 		    char *s;
                     (void) fputs(" (p.~\\pageref{", file);
@@ -563,6 +590,7 @@ puttex( char *str, FILE *file)
         case ')':
         case '.':
             see = FALSE;
+            ja_see = FALSE;
 	default:
 	    (void) fputc(ch, file);
 	    break;

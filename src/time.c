@@ -39,9 +39,22 @@
 
 
 #include "gp_time.h"
+#include "gplocale.h"
+#include "eval.h"
 
 #include "util.h"
-#include "variable.h"
+
+const struct gen_table timelevels_tbl[] =
+{
+    { "sec$onds", TIMELEVEL_SECONDS },
+    { "min$utes", TIMELEVEL_MINUTES },
+    { "hour$s",   TIMELEVEL_HOURS },
+    { "day$s",    TIMELEVEL_DAYS },
+    { "week$s",   TIMELEVEL_WEEKS },
+    { "mon$ths",  TIMELEVEL_MONTHS },
+    { "year$s",   TIMELEVEL_YEARS },
+    { NULL,       TIMELEVEL_DEFAULT }
+};
 
 static char *read_int(char *s, int nr, int *d);
 
@@ -89,8 +102,6 @@ gdysize(int yr)
  *		(tD tH tM tS).  The relative time in seconds is returned
  *		in reltime.
  * DT_BAD	time format could not be interpreted
- *
- * parameters and return values revised for gnuplot version 5.3
  */
 
 td_type
@@ -348,7 +359,8 @@ gstrptime(char *s, char *fmt, struct tm *tm, double *usec, double *reltime)
 #endif
 
 	default:
-	    int_warn(DATAFILE, "Bad time format in string");
+	    int_warn(DATAFILE, "Bad time format %%%c", *fmt);
+
 	}
 	fmt++;
     }
@@ -768,13 +780,49 @@ xstrftime(
 
 
 
-/* time_t  */
+/* Convert struct tm to seconds from epoch date.
+ * Modifies content of tm!
+ * NB:
+ *	Unlike POSIX mktime(), this code does not fully normalize the
+ *	content of tm.
+ *      I.e.  32 October becomes 1 November
+ *	      but tm_wday and tm_yday are not recalculated.
+ *	Time zone info is ignored - always returns GMT
+ */
 double
 gtimegm(struct tm *tm)
 {
     int i;
+    int mday;
+
     /* returns sec from year ZERO_YEAR in UTC, defined in gp_time.h */
     double dsec = 0.;
+
+    /* Partial normalization (at least make sure month does not overflow! */
+    if (tm->tm_sec >= 60) {
+	tm->tm_min += (tm->tm_sec / 60);
+	tm->tm_sec -= 60 * (tm->tm_sec / 60);
+    }
+    if (tm->tm_min >= 60) {
+	tm->tm_hour += (tm->tm_min / 60);
+	tm->tm_min -= 60 * (tm->tm_min / 60);
+    }
+    if (tm->tm_hour >= 24) {
+	tm->tm_mday += (tm->tm_hour / 24);
+	tm->tm_hour -= 24 * (tm->tm_hour / 24);
+    }
+    if (tm->tm_mon == 1 && gdysize(tm->tm_year) > 365)
+	mday = 29; /* Leap year! */
+    else
+	mday = mndday[ (tm->tm_mon/12) ];
+    if (tm->tm_mday > mday) {
+	tm->tm_mday -= mday;
+	tm->tm_mon += 1;
+    }
+    while (tm->tm_mon >= 12) {
+	tm->tm_mon -= 12;
+	tm->tm_year += 1;
+    }
 
     if (tm->tm_year < ZERO_YEAR) {
 	for (i = tm->tm_year; i < ZERO_YEAR; i++) {
@@ -972,7 +1020,7 @@ weekdate( int year, int week, int day, int standard )
     time_tm.tm_mon = 0;
     time = gtimegm(&time_tm);
 
-    /* Normalize (unlike mktime, gtimegm does not recalculation wday) */
+    /* Normalize (unlike mktime, gtimegm does not recalculate wday) */
     ggmtime(&time_tm, time);
 
     /* Add offset to nearest Sunday (ISO 8601) */
@@ -991,3 +1039,86 @@ weekdate( int year, int week, int day, int standard )
 
     return time;
 }
+
+/* User-visible functions for accessing fields from tm structure.
+ * They are all the same, so define a macro
+ */
+#define TIMEFUNC(name, field)					\
+void								\
+name(union argument *arg)					\
+{								\
+    struct value a;						\
+    struct tm tm;						\
+								\
+    (void) arg;			/* avoid -Wunused warning */	\
+    (void) pop(&a);						\
+    ggmtime(&tm, real(&a));					\
+    push(Gcomplex(&a, (double)tm.field, 0.0));			\
+}
+
+TIMEFUNC( f_tmsec, tm_sec)
+TIMEFUNC( f_tmmin, tm_min)
+TIMEFUNC( f_tmhour, tm_hour)
+TIMEFUNC( f_tmmday, tm_mday)
+TIMEFUNC( f_tmmon, tm_mon)
+TIMEFUNC( f_tmyear, tm_year)
+TIMEFUNC( f_tmwday, tm_wday)
+TIMEFUNC( f_tmyday, tm_yday)
+
+void								
+f_tmweek(union argument *arg)					
+{								
+    struct value a;						
+    int week;
+    int standard;
+								
+    (void) arg;			/* avoid -Wunused warning */	
+    if ((pop(&a)->type != INTGR) || (a.v.int_val < 0) || (a.v.int_val > 1))
+	int_error(NO_CARET, "syntax: tm_week(time, standard)");
+    standard = a.v.int_val;
+    week = tmweek(real(pop(&a)), standard);
+    push(Ginteger(&a, week));
+}
+
+/*
+ * time = weekdate_iso( year, week [, day] )
+ */
+void
+f_weekdate_iso(union argument *arg)
+{
+    struct value a;
+    int nparams;
+    int year, week, day;
+
+    (void) arg;			/* avoid -Wunused warning */	
+    nparams = real(pop(&a));
+    if (nparams == 3)
+	day = real(pop(&a));
+    else
+	day = 1;
+    week = real(pop(&a));
+    year = real(pop(&a));
+    push(Gcomplex(&a, weekdate(year, week, day, 0), 0.0));
+}
+
+/*
+ * time = weekdate_cdc( year, week [, day] )
+ */
+void
+f_weekdate_cdc(union argument *arg)
+{
+    struct value a;
+    int nparams;
+    int year, week, day;
+
+    (void) arg;			/* avoid -Wunused warning */	
+    nparams = real(pop(&a));
+    if (nparams == 3)
+	day = real(pop(&a));
+    else
+	day = 1;
+    week = real(pop(&a));
+    year = real(pop(&a));
+    push(Gcomplex(&a, weekdate(year, week, day, 1), 0.0));
+}
+

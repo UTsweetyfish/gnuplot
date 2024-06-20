@@ -87,15 +87,17 @@
  * Karl Ratzsch, May 2014: Add a result variable reporting the number of
  * iterations
  *
+ * Ethan Merritt, Mar 2021:  Wrap the entire fit command in an exception
+ * handler so that a user script can recover from fit errors.
  */
 
 #include "fit.h"
 #include "alloc.h"
-#include "axis.h"
 #include "command.h"
 #include "datablock.h"
 #include "datafile.h"
 #include "eval.h"
+#include "gplocale.h"
 #include "gp_time.h"
 #include "matrix.h"
 #include "misc.h"
@@ -104,7 +106,6 @@
 #include "scanner.h"  /* For legal_identifier() */
 #include "specfun.h"
 #include "util.h"
-#include "variable.h" /* For locale handling */
 #include <signal.h>
 
 /* Just temporary */
@@ -176,6 +177,9 @@ typedef enum marq_res marq_res_t;
 
 /* externally visible variables: */
 
+/* pointer to longjmp recovery point of "fit" command */
+JMP_BUF *fit_env = NULL;
+
 /* fit control */
 char *fitlogfile = NULL;
 TBOOLEAN fit_suppress_log = FALSE;
@@ -187,6 +191,7 @@ TBOOLEAN fit_prescale = TRUE;
 char *fit_script = NULL;
 int fit_wrap = 0;
 TBOOLEAN fit_v4compatible = FALSE;
+char *last_fit_command = NULL;
 
 /* names of user control variables */
 const char * FITLIMIT = "FIT_LIMIT";
@@ -236,7 +241,6 @@ static t_value **par_udv;	/* array of pointers to the "via" variables */
 static fixstr *last_par_name = NULL;
 static int last_num_params = 0;
 static char *last_dummy_var[MAX_NUM_VAR];
-static char *last_fit_command = NULL;
 
 /* Mar 2014 - the single hottest call path in fit was looking up the
  * dummy parameters by name (4 billion times in fit.dem).
@@ -252,6 +256,8 @@ static udvt_entry *fit_dummy_udvs[MAX_NUM_VAR];
 static RETSIGTYPE ctrlc_handle(int an_int);
 #endif
 static void ctrlc_setup(void);
+
+static void fit_main(void);
 static marq_res_t marquardt(double a[], double **alpha, double *chisq, double *lambda);
 static void analyze(double a[], double **alpha, double beta[],
 				 double *chisq, double **deriv);
@@ -280,22 +286,42 @@ static char *get_next_word(char **s, char *subst);
 
 
 /*****************************************************************
-    Small function to write the last fit command into a file
-    Arg: Pointer to the file; if NULL, nothing is written,
-         but only the size of the string is returned.
+    Interface to the gnuplot "fit" command
 *****************************************************************/
-
-size_t
-wri_to_fil_last_fit_cmd(FILE *fp)
+void
+fit_command()
 {
-    if (last_fit_command == NULL)
-	return 0;
-    if (fp == NULL)
-	return strlen(last_fit_command);
-    else
-	return (size_t) fputs(last_fit_command, fp);
-}
+    static JMP_BUF fit_jumppoint;
 
+    if (evaluate_inside_functionblock && inside_plot_command)
+	int_error(NO_CARET, "fit command not possible in this context");
+    inside_plot_command = TRUE;
+
+    /* Set up an exception handler for errors that occur during "fit".
+     * Normally these would return to the top level command parser via
+     * a longjmp from int_error() and bail_to_command_line().
+     * We introduce a separate jump point here so that a call to "fit"
+     * always returns to the call point regardless of success or error.
+     * The caller must then check for success.
+     */
+    fit_env = &fit_jumppoint;
+    if (SETJMP(*fit_env,1)) {
+	fit_env = NULL;
+	fprintf(stderr, "*** FIT ERROR ***\n");
+	free(last_fit_command);
+	last_fit_command = NULL;
+	while (!END_OF_COMMAND)
+	    c_token++;
+	Ginteger( &(add_udv_by_name("FIT_ERROR")->udv_value), 1);
+	inside_plot_command = FALSE;
+	return;
+    }
+
+    fit_main();
+    fit_env = NULL;
+    Ginteger( &(add_udv_by_name("FIT_ERROR")->udv_value), 0);
+    inside_plot_command = FALSE;
+}
 
 /*****************************************************************
     This is called when a SIGINT occurs during fit
@@ -355,7 +381,9 @@ getchx()
 
 
 /*****************************************************************
-    in case of fatal errors
+    Clean up data structures specfic to fatal errors during fit.
+    After this we invoke the generic int_error(),
+    which in turn returrns via longjmp to the start of this "fit".
 *****************************************************************/
 void
 error_ex(int t_num, const char *str, ...)
@@ -396,13 +424,14 @@ error_ex(int t_num, const char *str, ...)
     /* restore original SIGINT function */
     interrupt_setup();
 
-    /* FIXME: It would be nice to exit the "fit" command non-fatally, */
-    /* so that the script who called it can recover and continue.     */
-    /* int_error() makes that impossible.  But if we use int_warn()   */
-    /* instead the program tries to continue _inside_ the fit, which  */
-    /* generally then dies on some more serious error.                */
-
-    /* exit via int_error() so that it can clean up state variables */
+    /* Usually int_error() returns to the top level command parser
+     * via longjmp at a point equivalent to program entry.
+     * However in this case we introduced a nested handler at the
+     * start of command processing in fit_command() so that control
+     * returns after the "fit" command regardless of success or
+     * failure.  It is then up to the caller to continue or not
+     * after a failed "fit".
+     */
     int_error(t_num, buf);
 }
 
@@ -531,8 +560,8 @@ effective_error(double **deriv, int i)
     if (num_errors <= 1) /* z-errors or equal weights */
 	tot_err = err_data[i];
     else {
-	/* "Effective variance" according to 
-	 *  Jay Orear, Am. J. Phys., Vol. 50, No. 10, October 1982 
+	/* "Effective variance" according to
+	 *  Jay Orear, Am. J. Phys., Vol. 50, No. 10, October 1982
 	 */
 	tot_err = SQR(err_data[i * num_errors + (num_errors - 1)]);
 	for (j = 0, k = 0; j < num_indep; j++) {
@@ -561,7 +590,7 @@ analyze(double a[], double **C, double d[], double *chisq, double ** deriv)
 
     calculate(d, C, a);
 
-    /* derivatives in indep. variables are required for 
+    /* derivatives in indep. variables are required for
        effective variance method */
     if (num_errors > 1)
 	calc_derivatives(a, d, deriv);
@@ -895,7 +924,7 @@ regress_finalize(int iter, double chisq, double last_chisq, double lambda, doubl
     v = add_udv_by_name("FIT_P");
     Gcomplex(&v->udv_value, pvalue, 0);
     v = add_udv_by_name("FIT_NITER");
-    Ginteger(&v->udv_value, niter);    
+    Ginteger(&v->udv_value, niter);
 
     /* Save final parameters. Depending on the backend and
        its internal state, the last call_gnuplot may not have been
@@ -903,7 +932,7 @@ regress_finalize(int iter, double chisq, double last_chisq, double lambda, doubl
     for (i = 0; i < num_params; i++)
 	Gcomplex(par_udv[i], a[i] * scale_params[i], 0.0);
 
-    /* Set error and covariance variables to zero, 
+    /* Set error and covariance variables to zero,
        thus making sure they are created. */
     if (fit_errorvariables) {
 	for (i = 0; i < num_params; i++)
@@ -992,12 +1021,11 @@ regress_check_stop(int iter, double chisq, double last_chisq, double lambda)
  *  which also generates #ifdefs)
  *
  *  I hope that other OSes do it better, if not... add #ifdefs :-(
- *  EMX does not have kbhit.
  *
  *  HBB: I think this can be enabled for DJGPP V2. SIGINT is actually
  *  handled there, AFAIK.
  */
-#if (defined(MSDOS) && !defined(__EMX__))
+#ifdef MSDOS
     if (kbhit()) {
 	do {
 	    getchx();
@@ -1227,11 +1255,9 @@ fit_show(int i, double chisq, double last_chisq, double* a, double lambda, FILE 
 	    i, chisq, chisq > NEARLY_ZERO ? (chisq - last_chisq) / chisq : 0.0,
 	    chisq - last_chisq, epsilon);
     if (fit_show_lambda)
-	fprintf(device, "\
- lambda	     : %g\n", lambda);
-	fprintf(device, "\n\
-%s parameter values\n\n",
-	    (i > 0 ? "resultant" : "initial set of free"));
+	fprintf(device, " lambda	     : %g\n", lambda);
+    fprintf(device, "\n %s parameter values\n\n",
+	(i > 0 ? "resultant" : "initial set of free"));
     for (k = 0; k < num_params; k++)
 	fprintf(device, "%-15.15s = %g\n", par_name[k], a[k] * scale_params[k]);
 }
@@ -1394,7 +1420,7 @@ setvar(char *varname, double data)
 
 
 /*****************************************************************
-    Set a user-defined variable from an error variable: 
+    Set a user-defined variable from an error variable:
     Take the parameter name, turn it  into an error parameter
     name (e.g. a to a_err) and then set it.
 ******************************************************************/
@@ -1534,7 +1560,7 @@ print_function_definitions_recursion(struct at_type *at, int *count, int maxfun,
 		    break;
 		}
 	    }
-	    rc |= print_function_definitions_recursion(at->actions[i].arg.udf_arg->at, 
+	    rc |= print_function_definitions_recursion(at->actions[i].arg.udf_arg->at,
 	                                               count, maxfun, definitions,
 	                                               depth + 1, maxdepth);
 	}
@@ -1566,11 +1592,11 @@ print_function_definitions(struct at_type *at, FILE * device)
 
 
 /*****************************************************************
-    Interface to the gnuplot "fit" command
+    The original "fit" command
 *****************************************************************/
 
 void
-fit_command()
+fit_main()
 {
     /* Backwards compatibility - these were the default names in 4.4 and 4.6	*/
     static const char *dummy_old_default[5] = {"x","y","t","u","v"};
@@ -1815,7 +1841,7 @@ fit_command()
 	    /* default to unitweights */
 	    num_indep = (columns == 0) ? 1 : columns - 1;
 	    num_errors = 0;
-	} 
+	}
     }
 
     FPRINTF((stderr, "cmd=%s\n", gp_input_line));
@@ -1970,11 +1996,12 @@ fit_command()
 	case DF_FIRST_BLANK:
 	case DF_SECOND_BLANK:
 	    continue;
-	case DF_COLUMN_HEADERS:
+	case DF_COMPLEX_VALUE:
 	    continue;
+	case DF_COLUMN_HEADERS:
 	case DF_FOUND_KEY_TITLE:
 	    continue;
-	case 0:
+	case DF_BAD:
 	    Eex2("bad data on line %d of datafile", df_line_number);
 	    break;
 	case 1:		/* only z provided */

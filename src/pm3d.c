@@ -35,32 +35,35 @@ TBOOLEAN track_pm3d_quadrangles;
 /*
   Global options for pm3d algorithm (to be accessed by set / show).
 */
-pm3d_struct pm3d;	/* Initialized via init_session->reset_command->reset_pm3d */
+pm3d_struct pm3d;	/* Initialized via init_session->reset_command->pm3d_reset */
 
 lighting_model pm3d_shade;
 
 typedef struct {
     double gray;
-    double z; /* z value after rotation to graph coordinates for depth sorting */
+    double depth;		/* line-of-sight z after rotation to graph coordinates */
     union {
 	gpdPoint corners[4];	/* The normal case. vertices stored right here */
 	int array_index;	/* Stored elsewhere if there are more than 4 */
     } vertex;
-    union {		/* Only used by depthorder processing */
-	t_colorspec *colorspec;
-	unsigned int rgb_color;
-    } qcolor;
-    short fillstyle;	/* from plot->fill_properties */
-    short type;		/* QUAD_TYPE_NORMAL or QUAD_TYPE_4SIDES etc */
+    struct surface_points *from_plot;
+    unsigned int qcolor; 	/* Only used by depthorder processing */
+    short index;		/* Index into from_plot->zclip, if it exists */
+				/* this is really the fillstyle if this is an object */
+    short type;			/* QUAD_TYPE_NORMAL or QUAD_TYPE_LARGEPOLYGON etc */
+#ifdef WITH_2ND_SORTKEY
+    int sequence;		/* The original order of added quadrangles */
+#endif
 } quadrangle;
 
 #define QUAD_TYPE_NORMAL   0
+#define QUAD_TYPE_SKIP    -1
 #define QUAD_TYPE_TRIANGLE 3
 #define QUAD_TYPE_4SIDES   4
 #define QUAD_TYPE_LARGEPOLYGON 5
 
-#define PM3D_USE_COLORSPEC_INSTEAD_OF_GRAY -12345
-#define PM3D_USE_RGB_COLOR_INSTEAD_OF_GRAY -12346
+#define PM3D_USE_COLORSPEC_INSTEAD_OF_GRAY  -12345
+#define PM3D_USE_RGB_COLOR_INSTEAD_OF_GRAY  -12346
 #define PM3D_USE_BACKGROUND_INSTEAD_OF_GRAY -12347
 
 static int allocated_quadrangles = 0;
@@ -83,17 +86,25 @@ static double rms4(double, double, double, double);
 static void pm3d_plot(struct surface_points *, int);
 static void pm3d_option_at_error(void);
 static void pm3d_rearrange_part(struct iso_curve *, const int, struct iso_curve ***, int *);
-static int apply_lighting_model( struct coordinate *, struct coordinate *, struct coordinate *, struct coordinate *, double gray );
+static int apply_lighting_model(struct coordinate *, struct coordinate *,
+				struct coordinate *, struct coordinate *,
+				double gray, TBOOLEAN gray_is_rgb );
 static void illuminate_one_quadrangle( quadrangle *q );
 
-static void filled_polygon(gpdPoint *corners, int fillstyle, int nv);
-static int clip_filled_polygon( gpdPoint *inpts, gpdPoint *outpts, int nv );
+static void filled_polygon(struct surface_points *from_plot, int index,
+			    gpdPoint *corners, int nv);
+static int clip_filled_polygon(struct surface_points *from_plot, int index,
+			    gpdPoint *inpts, gpdPoint *outpts, int nv );
 
 static TBOOLEAN color_from_rgbvar = FALSE;
 static double light[3];
 
+static TBOOLEAN reserve_quadrangles(int needed, int chunk);
+
 static gpdPoint *get_polygon(int size);
 static void free_polygonlist(void);
+
+static void split_intersecting_surface_tiles(void);
 
 /*
  * Utility routines.
@@ -344,20 +355,28 @@ pm3d_rearrange_scan_array(
     }
 }
 
-static int compare_quadrangles(const void* v1, const void* v2)
+static int
+compare_quadrangles(const void* v1, const void* v2)
 {
     const quadrangle* q1 = (const quadrangle*)v1;
     const quadrangle* q2 = (const quadrangle*)v2;
 
-    if (q1->z > q2->z)
+    if (q1->depth > q2->depth)
 	return 1;
-    else if (q1->z < q2->z)
+    else if (q1->depth < q2->depth)
 	return -1;
+#ifdef WITH_2ND_SORTKEY
+    else if (q1->sequence > q2->sequence)
+	return 1;
+    else if (q1->sequence < q2->sequence)
+	return -1;
+#endif
     else
 	return 0;
 }
 
-void pm3d_depth_queue_clear(void)
+void
+pm3d_depth_queue_clear(void)
 {
     free(quadrangles);
     quadrangles = NULL;
@@ -365,10 +384,13 @@ void pm3d_depth_queue_clear(void)
     current_quadrangle = 0;
 }
 
-void pm3d_depth_queue_flush(void)
+void
+pm3d_depth_queue_flush(void)
 {
     if (pm3d.direction != PM3D_DEPTH && !track_pm3d_quadrangles)
 	return;
+
+    split_intersecting_surface_tiles();
 
     term->layer(TERM_LAYER_BEGIN_PM3D_FLUSH);
 
@@ -384,8 +406,7 @@ void pm3d_depth_queue_flush(void)
 	if (pm3d.base_sort)
 	    cliptorange(zbase, Z_AXIS.min, Z_AXIS.max);
 
-	for (qp = quadrangles, qe = quadrangles + current_quadrangle; qp != qe; qp++) {
-	    double z = 0;
+	for (qp = quadrangles, qe = &quadrangles[current_quadrangle]; qp != qe; qp++) {
 	    double zmean = 0;
 
 	    if (qp->type == QUAD_TYPE_LARGEPOLYGON) {
@@ -393,9 +414,8 @@ void pm3d_depth_queue_flush(void)
 		nv = gpdPtr[2].c;
 	    } else {
 		gpdPtr = qp->vertex.corners;
-		nv = 4;
+		nv = (qp->type == QUAD_TYPE_TRIANGLE) ? 3 : 4;
 	    }
-
 
 	    for (i = 0; i < nv; i++, gpdPtr++) {
 		/* 3D boxes want to be sorted on z of the base, not the mean z */
@@ -404,27 +424,31 @@ void pm3d_depth_queue_flush(void)
 		else
 		    map3d_xyz(gpdPtr->x, gpdPtr->y, gpdPtr->z, &out);
 		zmean += out.z;
-		if (i == 0 || out.z > z)
-		    z = out.z;
 	    }
 
-	    if (pm3d.zmean_sort)
-		qp->z = zmean / nv;
-	    else
-		qp->z = z;
+	    qp->depth = zmean / nv;
 	}
 
-	qsort(quadrangles, current_quadrangle, sizeof (quadrangle), compare_quadrangles);
+	gp_qsort(quadrangles, current_quadrangle, sizeof (quadrangle), compare_quadrangles);
 
-	for (qp = quadrangles, qe = quadrangles + current_quadrangle; qp != qe; qp++) {
+	for (qp = quadrangles, qe = &quadrangles[current_quadrangle]; qp != qe; qp++) {
+
+	    /* skip this one (e.g. if it was removed by split_intersecting_surface_tiles) */
+	    if (qp->type == QUAD_TYPE_SKIP)
+		continue;
 
 	    /* set the color */
-	    if (qp->gray == PM3D_USE_COLORSPEC_INSTEAD_OF_GRAY)
-		apply_pm3dcolor(qp->qcolor.colorspec);
+	    if (qp->from_plot && qp->from_plot->plot_style == CONTOURFILL) {
+		if (qp->from_plot->zclip) {
+		    t_colorspec *color = &(qp->from_plot->zclip[qp->index].color);
+		    apply_pm3dcolor(color);
+		}	/* else { something went badly wrong, give an error? } */
+	    } else if (qp->gray == PM3D_USE_COLORSPEC_INSTEAD_OF_GRAY)
+		apply_pm3dcolor(&qp->from_plot->lp_properties.pm3d_color);
 	    else if (qp->gray == PM3D_USE_BACKGROUND_INSTEAD_OF_GRAY)
 		term->linetype(LT_BACKGROUND);
 	    else if (qp->gray == PM3D_USE_RGB_COLOR_INSTEAD_OF_GRAY)
-		set_rgbcolor_var(qp->qcolor.rgb_color);
+		set_rgbcolor_var(qp->qcolor);
 	    else if (pm3d_shade.strength > 0)
 		set_rgbcolor_var((unsigned int)qp->gray);
 	    else
@@ -433,9 +457,9 @@ void pm3d_depth_queue_flush(void)
 	    if (qp->type == QUAD_TYPE_LARGEPOLYGON) {
 		gpdPoint *vertices = &polygonlist[qp->vertex.array_index];
 		int nv = vertices[2].c;
-		filled_polygon(vertices, qp->fillstyle, nv);
+		filled_polygon(qp->from_plot, qp->index, vertices, nv);
 	    } else {
-		filled_polygon(qp->vertex.corners, qp->fillstyle, 4);
+		filled_polygon(qp->from_plot, qp->index, qp->vertex.corners, 4);
 	    }
 	}
     }
@@ -466,14 +490,13 @@ pm3d_plot(struct surface_points *this_plot, int at_which_z)
     gpdPoint **bl_point = NULL; /* used for bilinear interpolation */
     TBOOLEAN color_from_column = FALSE;
     TBOOLEAN color_from_fillcolor = FALSE;
-    int plot_fillstyle;
+    udvt_entry *private_colormap = NULL;
 
     /* should never happen */
     if (this_plot == NULL)
 	return;
 
     /* just a shortcut */
-    plot_fillstyle = style_from_fill(&this_plot->fill_properties);
     color_from_column = this_plot->pm3d_color_from_column;
     color_from_rgbvar = FALSE;
 
@@ -487,8 +510,12 @@ pm3d_plot(struct surface_points *this_plot, int at_which_z)
 	color_from_fillcolor = TRUE;
     }
 
-    /* Apply and save the user-requested line properties */
-    term_apply_lp_properties(&this_plot->lp_properties);
+    if (this_plot->lp_properties.colormap)
+	private_colormap = this_plot->lp_properties.colormap;
+
+    /* Feb 2023:  not necessary and may be counter-productive
+	term_apply_lp_properties(&this_plot->lp_properties);
+     */
 
     if (at_which_z != PM3D_AT_BASE && at_which_z != PM3D_AT_TOP && at_which_z != PM3D_AT_SURFACE)
 	return;
@@ -515,7 +542,7 @@ pm3d_plot(struct surface_points *this_plot, int at_which_z)
 
     scanA = this_plot->iso_crvs;
 
-    pm3d_rearrange_scan_array(this_plot, &scan_array, &scan_array_n, &invert, (struct iso_curve ***) 0, (int *) 0, (int *) 0);
+    pm3d_rearrange_scan_array(this_plot, &scan_array, &scan_array_n, &invert, NULL, NULL, NULL);
 
     interp_i = pm3d.interp_i;
     interp_j = pm3d.interp_j;
@@ -581,19 +608,9 @@ pm3d_plot(struct surface_points *this_plot, int at_which_z)
 	}
 	needed_quadrangles *= (interp_i > 1) ? interp_i : 1;
 	needed_quadrangles *= (interp_j > 1) ? interp_j : 1;
-
-	if (needed_quadrangles > 0) {
-	    while (current_quadrangle + needed_quadrangles >= allocated_quadrangles) {
-		FPRINTF((stderr, "allocated_quadrangles = %d current = %d needed = %d\n",
-		    allocated_quadrangles, current_quadrangle, needed_quadrangles));
-		allocated_quadrangles = needed_quadrangles + 2*allocated_quadrangles;
-		quadrangles = (quadrangle*)gp_realloc(quadrangles,
-			    allocated_quadrangles * sizeof (quadrangle),
-			    "pm3d_plot->quadrangles");
-	    }
-	}
+	if (needed_quadrangles > 0)
+	    reserve_quadrangles(needed_quadrangles, 0);
     }
-    /* pm3d_rearrange_scan_array(this_plot, (struct iso_curve***)0, (int*)0, &scan_array, &invert); */
 
 #if 0
     /* debugging: print scan_array */
@@ -739,8 +756,7 @@ pm3d_plot(struct surface_points *this_plot, int at_which_z)
 		} else if (color_from_fillcolor) {
 		    /* color is set by "fc <rgbvalue>" */
 		    cb1 = cb2 = cb3 = cb4 = this_plot->fill_properties.border_color.lt;
-		    /* EXPERIMENTAL
-		     * pm3d fc linestyle N generates
+		    /* pm3d fc linestyle N generates
 		     * top/bottom color difference as with hidden3d
 		     */
 		    if (this_plot->fill_properties.border_color.type == TC_LINESTYLE) {
@@ -805,22 +821,31 @@ pm3d_plot(struct surface_points *this_plot, int at_which_z)
 
 		if (color_from_rgbvar) /* we were given an RGB color */
 			gray = avgC;
+		else if (private_colormap)
+			gray = map2gray(avgC, private_colormap);
 		else /* transform z value to gray, i.e. to interval [0,1] */
 			gray = cb2gray(avgC);
 
 		/* apply lighting model */
 		if (pm3d_shade.strength > 0) {
-		    if (at_which_z == PM3D_AT_SURFACE)
+		    if (at_which_z == PM3D_AT_SURFACE) {
+			TBOOLEAN gray_is_rgb = color_from_rgbvar;
+			if (private_colormap) {
+			    gray = rgb_from_colormap(gray, private_colormap);
+			    gray_is_rgb = TRUE;
+			}
 			gray = apply_lighting_model( &pointsA[i], &pointsA[i1],
-					&pointsB[ii], &pointsB[ii1], gray);
+					&pointsB[ii], &pointsB[ii1], gray, gray_is_rgb);
+		    }
 		    /* Don't apply lighting model to TOP/BOTTOM projections  */
 		    /* but convert from floating point 0<gray<1 to RGB color */
 		    /* since that is what would have been returned from the  */
 		    /* lighting code.					     */
-		    else if (!color_from_rgbvar) {
-			rgb255_color temp;
-			rgb255maxcolors_from_gray(gray, &temp);
-			gray = (long)((temp.r << 16) + (temp.g << 8) + (temp.b));
+		    else if (private_colormap) {
+			gray = rgb_from_colormap(gray, private_colormap);
+		    } else if (!color_from_rgbvar) {
+			unsigned int temp = rgb_from_gray(gray);
+			gray = (long)temp;
 		    }
 		}
 
@@ -828,6 +853,8 @@ pm3d_plot(struct surface_points *this_plot, int at_which_z)
 		if (pm3d.direction != PM3D_DEPTH) {
 		    if (color_from_rgbvar || pm3d_shade.strength > 0)
 			set_rgbcolor_var((unsigned int)gray);
+		    else if (private_colormap)
+			set_rgbcolor_var(rgb_from_colormap(gray, private_colormap));
 		    else
 			set_color(gray);
 		}
@@ -928,6 +955,11 @@ pm3d_plot(struct surface_points *this_plot, int at_which_z)
 			    corners[0].x, corners[0].y, corners[1].x, corners[1].y,
 			    corners[2].x, corners[2].y, corners[3].x, corners[3].y));
 
+			/* Is this quadrangle masked? */
+			if (this_plot->plot_filter == FILTER_MASK)
+			    if (masked(corners[0].x, corners[0].y, mask_3Dpolygon_set))
+				continue;
+
 			/* If the colors are given separately, we already loaded them above */
 			if (color_from_column) {
 			    cb1 = corners[0].c;
@@ -958,8 +990,7 @@ pm3d_plot(struct surface_points *this_plot, int at_which_z)
 			if (color_from_fillcolor) {
 			    /* color is set by "fc <rgbval>" */
 			    gray = this_plot->fill_properties.border_color.lt;
-			    /* EXPERIMENTAL
-			     * pm3d fc linestyle N generates
+			    /* pm3d fc linestyle N generates
 			     * top/bottom color difference as with hidden3d
 			     */
 			    if (this_plot->fill_properties.border_color.type == TC_LINESTYLE) {
@@ -990,63 +1021,95 @@ pm3d_plot(struct surface_points *this_plot, int at_which_z)
 				corcorners[i].z = corners[i].z;
 			    }
 
-			    if (at_which_z == PM3D_AT_SURFACE)
+			    if (private_colormap) {
+				gray = rgb_from_colormap(gray, private_colormap);
+				if (at_which_z == PM3D_AT_SURFACE)
+				    gray = apply_lighting_model( &corcorners[0], &corcorners[1],
+					    &corcorners[2], &corcorners[3], gray, TRUE);
+
+			    } else if (at_which_z == PM3D_AT_SURFACE) {
 				gray = apply_lighting_model( &corcorners[0], &corcorners[1],
-						&corcorners[2], &corcorners[3], gray);
+					&corcorners[2], &corcorners[3], gray, color_from_rgbvar);
+
 			    /* Don't apply lighting model to TOP/BOTTOM projections  */
 			    /* but convert from floating point 0<gray<1 to RGB color */
 			    /* since that is what would have been returned from the  */
 			    /* lighting code.					     */
-			    else if (!color_from_rgbvar) {
-				rgb255_color temp;
-				rgb255maxcolors_from_gray(gray, &temp);
-				gray = (long)((temp.r << 16) + (temp.g << 8) + (temp.b));
+			    } else if (!color_from_rgbvar) {
+				unsigned int temp = rgb_from_gray(gray);
+				gray = (long)temp;
 			    }
 			}
 
+			/* FIXME: overwriting the z coordinates loses the option to
+			 * do smooth clipping on z in the top/bottom planes
+			 */
+			if (at_which_z == PM3D_AT_BASE)
+			    corners[0].z = corners[1].z = corners[2].z = corners[3].z
+				= base_z;
+			else if (at_which_z == PM3D_AT_TOP)
+			    corners[0].z = corners[1].z = corners[2].z = corners[3].z
+				= ceiling_z;
+
 			if (pm3d.direction == PM3D_DEPTH) {
 			    /* copy quadrangle */
-			    quadrangle* qp = quadrangles + current_quadrangle;
+			    quadrangle* qp = &quadrangles[current_quadrangle];
 			    memcpy(qp->vertex.corners, corners, 4 * sizeof (gpdPoint));
-			    if (color_from_rgbvar) {
+			    qp->from_plot = this_plot;
+			    if (color_from_rgbvar || pm3d_shade.strength > 0) {
 				qp->gray = PM3D_USE_RGB_COLOR_INSTEAD_OF_GRAY;
-				qp->qcolor.rgb_color = (unsigned int)gray;
+				qp->qcolor = (unsigned int)gray;
+			    } else if (private_colormap) {
+				qp->gray = PM3D_USE_RGB_COLOR_INSTEAD_OF_GRAY;
+				qp->qcolor = rgb_from_colormap(gray, private_colormap);
 			    } else {
 				qp->gray = gray;
-				qp->qcolor.colorspec = &this_plot->lp_properties.pm3d_color;
 			    }
-			    qp->fillstyle = plot_fillstyle;
+			    qp->index = this_plot->zclip_index;
 			    qp->type = QUAD_TYPE_NORMAL;
+#ifdef WITH_2ND_SORTKEY
+			    qp->sequence = current_quadrangle;
+#endif
 			    current_quadrangle++;
 			} else {
 			    if (pm3d_shade.strength > 0 || color_from_rgbvar)
 				set_rgbcolor_var((unsigned int)gray);
+			    else if (private_colormap)
+				set_rgbcolor_var(rgb_from_colormap(gray, private_colormap));
 			    else
 				set_color(gray);
-			    if (at_which_z == PM3D_AT_BASE)
-				corners[0].z = corners[1].z = corners[2].z = corners[3].z = base_z;
-			    else if (at_which_z == PM3D_AT_TOP)
-				corners[0].z = corners[1].z = corners[2].z = corners[3].z = ceiling_z;
-			    filled_polygon(corners, plot_fillstyle, 4);
+			    filled_polygon(this_plot, this_plot->zclip_index, corners, 4);
 			}
 		    }
 		}
 	    } else { /* thus (interp_i == 1 && interp_j == 1) */
+
+		/* Is this quadrangle masked? */
+		if (this_plot->plot_filter == FILTER_MASK)
+		    if (masked(corners[0].x, corners[0].y, mask_3Dpolygon_set))
+			continue;
+
 		if (pm3d.direction != PM3D_DEPTH) {
-		    filled_polygon(corners, plot_fillstyle, 4);
+		    filled_polygon(this_plot, this_plot->zclip_index, corners, 4);
 		} else {
 		    /* copy quadrangle */
-		    quadrangle* qp = quadrangles + current_quadrangle;
+		    quadrangle* qp = &quadrangles[current_quadrangle];
 		    memcpy(qp->vertex.corners, corners, 4 * sizeof (gpdPoint));
-		    if (color_from_rgbvar) {
+		    qp->from_plot = this_plot;
+		    if (color_from_rgbvar || pm3d_shade.strength > 0) {
 			qp->gray = PM3D_USE_RGB_COLOR_INSTEAD_OF_GRAY;
-			qp->qcolor.rgb_color = (unsigned int)gray;
+			qp->qcolor = (unsigned int)gray;
+		    } else if (private_colormap) {
+			qp->gray = PM3D_USE_RGB_COLOR_INSTEAD_OF_GRAY;
+			qp->qcolor = rgb_from_colormap(gray, private_colormap);
 		    } else {
 			qp->gray = gray;
-			qp->qcolor.colorspec = &this_plot->lp_properties.pm3d_color;
 		    }
-		    qp->fillstyle = plot_fillstyle;
+		    qp->index = this_plot->zclip_index;
 		    qp->type = QUAD_TYPE_NORMAL;
+#ifdef WITH_2ND_SORTKEY
+		    qp->sequence = current_quadrangle;
+#endif
 		    current_quadrangle++;
 		}
 	    } /* interpolate between points */
@@ -1084,7 +1147,6 @@ pm3d_reset()
     pm3d.no_clipcb = FALSE;
     pm3d.direction = PM3D_SCANS_AUTOMATIC;
     pm3d.base_sort = FALSE;
-    pm3d.zmean_sort = TRUE;	/* DEBUG: prior to Oct 2019 default sort used zmax */
     pm3d.implicit = PM3D_EXPLICIT;
     pm3d.which_corner_color = PM3D_WHICHCORNER_MEAN;
     pm3d.interp_i = 1;
@@ -1128,7 +1190,7 @@ pm3d_draw_one(struct surface_points *plot)
  * Also called by vplot_isosurface().
  */
 void
-pm3d_add_quadrangle(struct surface_points *plot, gpdPoint corners[4])
+pm3d_add_quadrangle(struct surface_points *plot, gpdPoint corners[])
 {
     pm3d_add_polygon(plot, corners, 4);
 }
@@ -1138,30 +1200,27 @@ pm3d_add_quadrangle(struct surface_points *plot, gpdPoint corners[4])
  * (plot == NULL) if we were called from do_polygon().
  */
 void
-pm3d_add_polygon(struct surface_points *plot, gpdPoint corners[4], int vertices)
+pm3d_add_polygon(struct surface_points *plot, gpdPoint corners[], int vertices)
 {
     quadrangle *q;
 
-    /* FIXME: I have no idea how to estimate the number of facets for an isosurface */
-    if (!plot || (plot->plot_style == ISOSURFACE)) {
-	if (allocated_quadrangles < current_quadrangle + 100) {
-	    allocated_quadrangles += 1000.;
-	    quadrangles = gp_realloc(quadrangles,
-		allocated_quadrangles * sizeof(quadrangle), "pm3d_add_quadrangle");
-	}
-    } else
-
-    if (allocated_quadrangles < current_quadrangle + plot->iso_crvs->p_count) {
-	allocated_quadrangles += 2 * plot->iso_crvs->p_count;
-	quadrangles = gp_realloc(quadrangles,
-		allocated_quadrangles * sizeof(quadrangle), "pm3d_add_quadrangle");
-    }
-    q = quadrangles + current_quadrangle++;
-    memcpy(q->vertex.corners, corners, 4*sizeof(gpdPoint));
-    if (plot)
-	q->fillstyle = style_from_fill(&plot->fill_properties);
+    if (!plot || (plot->plot_style == ISOSURFACE))
+	/* I have no idea how to estimate the number of facets for an isosurface */
+	reserve_quadrangles(100, 1000);
     else
-	q->fillstyle = 0;
+	reserve_quadrangles(plot->iso_crvs->p_count, 0);
+
+    q = &quadrangles[current_quadrangle];
+#ifdef WITH_2ND_SORTKEY
+    q->sequence = current_quadrangle;
+#endif
+    current_quadrangle++;
+    memcpy(q->vertex.corners, corners, 4*sizeof(gpdPoint));
+    q->from_plot = plot;
+    if (plot)
+	q->index = plot->zclip_index;
+    else /* this is a polygon object; "index" is really fillstyle */
+	q->index = 0;
 
     /* For triangles and normal quadrangles, the vertices are stored in
      * q->vertex.corners.  For larger polygons we store them in external array
@@ -1180,24 +1239,25 @@ pm3d_add_polygon(struct surface_points *plot, gpdPoint corners[4], int vertices)
     }
 
     if (!plot) {
-	/* This quadrangle came from "set object polygon" rather than "splot with pm3d" */
+	/* This quadrangle came from a polygon object rather than from splot */
 	if (corners[0].c == LT_BACKGROUND) {
 	    q->gray = PM3D_USE_BACKGROUND_INSTEAD_OF_GRAY;
 	} else {
-	    q->qcolor.rgb_color = corners[0].c;
+	    q->qcolor = corners[0].c;
 	    q->gray = PM3D_USE_RGB_COLOR_INSTEAD_OF_GRAY;
 	}
-	q->fillstyle = corners[1].c;
+	/* "index" is really fillstyle */
+	q->index = corners[1].c;
 
-    } else if (plot->pm3d_color_from_column) {
-	/* FIXME: color_from_rgbvar need only be set once per plot */
+    } else if (plot->pm3d_color_from_column
+		&& !(plot->plot_style == POLYGONS)) {
 	/* This is the usual path for 'splot with boxes' */
 	color_from_rgbvar = TRUE;
 	if (pm3d_shade.strength > 0) {
 	    q->gray = plot->lp_properties.pm3d_color.lt;
 	    illuminate_one_quadrangle(q);
 	} else {
-	    q->qcolor.rgb_color = plot->lp_properties.pm3d_color.lt;
+	    q->qcolor = plot->lp_properties.pm3d_color.lt;
 	    q->gray = PM3D_USE_RGB_COLOR_INSTEAD_OF_GRAY;
 	}
 
@@ -1232,7 +1292,7 @@ pm3d_add_polygon(struct surface_points *plot, gpdPoint corners[4], int vertices)
 	    lp_use_properties(&style, i);
 	    rgb_color = style.pm3d_color.lt;
 	}
-	q->qcolor.rgb_color = rgb_color;
+	q->qcolor = rgb_color;
 	if (pm3d_shade.strength > 0) {
 	    q->gray = rgb_color;
 	    color_from_rgbvar = TRUE;
@@ -1240,8 +1300,9 @@ pm3d_add_polygon(struct surface_points *plot, gpdPoint corners[4], int vertices)
 	}
 
     } else {
-	/* This is the usual [only?] path for 'splot with zerror' */
-	q->qcolor.colorspec = &plot->fill_properties.border_color;
+	/* This is the usual [only?] path for 'splot with zerror'.
+	 * It also handles some cases of 'splot with boxes'.
+	 */
 	q->gray = PM3D_USE_COLORSPEC_INSTEAD_OF_GRAY;
     }
 }
@@ -1288,8 +1349,14 @@ get_pm3d_at_option(char *pm3d_where)
     return 0;
 }
 
-/* Set flag plot_has_palette to TRUE if there is any element on the graph
- * which requires palette of continuous colors.
+/* Set flag plot_has_palette to TRUE if there is any element in the
+ * plot that requires the palette.   The program will test this when
+ * deciding whether to draw the colorbox.
+ * Nov 2021
+ * We used to check also for objects or labels (but not arrows, ...)
+ * because otherwise they could not use palette coloring.
+ * Now we allow them to use palette coloring regardless, so there is
+ * no reason to set the flag just because of an object or label.
  */
 void
 set_plot_with_palette(int plot_num, int plot_mode)
@@ -1297,10 +1364,9 @@ set_plot_with_palette(int plot_num, int plot_mode)
     struct surface_points *this_3dplot = first_3dplot;
     struct curve_points *this_2dplot = first_plot;
     int surface = 0;
-    struct text_label *this_label = first_label;
-    struct object *this_object;
 
     plot_has_palette = TRUE;
+
     /* Is pm3d switched on globally? */
     if (pm3d.implicit == PM3D_IMPLICIT)
 	return;
@@ -1328,6 +1394,8 @@ set_plot_with_palette(int plot_num, int plot_mode)
 	/* Any surface 'with pm3d', 'with image' or 'with line|dot palette'? */
 	while (surface++ < plot_num) {
 	    int type;
+	    if (this_3dplot->plot_style == CONTOURFILL)
+		return;
 	    if (this_3dplot->plot_style == PM3DSURFACE)
 		return;
 	    if (this_3dplot->plot_style == IMAGE)
@@ -1346,29 +1414,6 @@ set_plot_with_palette(int plot_num, int plot_mode)
 	    this_3dplot = this_3dplot->next_sp;
 	}
     }
-
-#define TC_USES_PALETTE(tctype) (tctype==TC_Z) || (tctype==TC_CB) || (tctype==TC_FRAC)
-
-    /* Any label with 'textcolor palette'? */
-    for (; this_label != NULL; this_label = this_label->next) {
-	if (TC_USES_PALETTE(this_label->textcolor.type))
-	    return;
-    }
-    /* Any of title, xlabel, ylabel, zlabel, ... with 'textcolor palette'? */
-    if (TC_USES_PALETTE(title.textcolor.type)) return;
-    if (TC_USES_PALETTE(axis_array[FIRST_X_AXIS].label.textcolor.type)) return;
-    if (TC_USES_PALETTE(axis_array[FIRST_Y_AXIS].label.textcolor.type)) return;
-    if (TC_USES_PALETTE(axis_array[SECOND_X_AXIS].label.textcolor.type)) return;
-    if (TC_USES_PALETTE(axis_array[SECOND_Y_AXIS].label.textcolor.type)) return;
-    if (plot_mode == MODE_SPLOT)
-	if (TC_USES_PALETTE(axis_array[FIRST_Z_AXIS].label.textcolor.type)) return;
-    if (TC_USES_PALETTE(axis_array[COLOR_AXIS].label.textcolor.type)) return;
-    for (this_object = first_object; this_object != NULL; this_object = this_object->next) {
-	if (TC_USES_PALETTE(this_object->lp_properties.pm3d_color.type))
-	    return;
-    }
-
-#undef TC_USES_PALETTE
 
     /* Palette with continuous colors is not used. */
     plot_has_palette = FALSE; /* otherwise it stays TRUE */
@@ -1392,8 +1437,8 @@ is_plot_with_colorbox()
 void
 pm3d_init_lighting_model()
 {
-    light[0] = cos(-DEG2RAD*pm3d_shade.rot_x)*cos(-(DEG2RAD*pm3d_shade.rot_z+90));
-    light[2] = cos(-DEG2RAD*pm3d_shade.rot_x)*sin(-(DEG2RAD*pm3d_shade.rot_z+90));
+    light[0] = cos(-DEG2RAD*pm3d_shade.rot_x)*cos(-(DEG2RAD*pm3d_shade.rot_z));
+    light[2] = cos(-DEG2RAD*pm3d_shade.rot_x)*sin(-(DEG2RAD*pm3d_shade.rot_z));
     light[1] = sin(-DEG2RAD*pm3d_shade.rot_x);
 }
 
@@ -1414,7 +1459,7 @@ illuminate_one_quadrangle( quadrangle *q )
     c3.x = vtmp.x; c3.y = vtmp.y; c3.z = vtmp.z;
     map3d_xyz(q->vertex.corners[3].x, q->vertex.corners[3].y, q->vertex.corners[3].z, &vtmp);
     c4.x = vtmp.x; c4.y = vtmp.y; c4.z = vtmp.z;
-    q->gray = apply_lighting_model( &c1, &c2, &c3, &c4, q->gray);
+    q->gray = apply_lighting_model( &c1, &c2, &c3, &c4, q->gray, color_from_rgbvar);
 }
 
 /*
@@ -1426,7 +1471,7 @@ illuminate_one_quadrangle( quadrangle *q )
 int
 apply_lighting_model( struct coordinate *v0, struct coordinate *v1,
 		struct coordinate *v2, struct coordinate *v3,
-		double gray )
+		double gray, TBOOLEAN gray_is_rgb )
 {
     double normal[3];
     double normal1[3];
@@ -1440,7 +1485,7 @@ apply_lighting_model( struct coordinate *v0, struct coordinate *v1,
     double r, g, b, tmp_r, tmp_g, tmp_b;
     double dot_prod, shade_fact, spec_fact;
 
-    if (color_from_rgbvar) {
+    if (gray_is_rgb) {
 	rgb = gray;
 	r = (double)((rgb >> 16) & 0xFF) / 255.;
 	g = (double)((rgb >>  8) & 0xFF) / 255.;
@@ -1473,13 +1518,13 @@ apply_lighting_model( struct coordinate *v0, struct coordinate *v1,
      */
     if (t < 1.e-12) {
 	if (v2 == v3) /* 2nd try; give up and return original color */
-	    return (color_from_rgbvar)
+	    return (gray_is_rgb)
 		? gray
 		:   ((unsigned char)(r*255.) << 16)
 		  + ((unsigned char)(g*255.) <<  8)
 		  + ((unsigned char)(b*255.));
 	else
-	    return apply_lighting_model(v0, v1, v3, v3, gray);
+	    return apply_lighting_model(  v0, v1, v3, v3, gray, gray_is_rgb);
     }
 
     normal[0] /= t;
@@ -1507,9 +1552,9 @@ apply_lighting_model( struct coordinate *v0, struct coordinate *v1,
     dot_prod = normal[0]*light[0] + normal[1]*light[1] + normal[2]*light[2];
     shade_fact = (dot_prod < 0) ? -dot_prod : 0;
 
-    tmp_r = r*(pm3d_shade.ambient-pm3d_shade.strength+shade_fact*pm3d_shade.strength);
-    tmp_g = g*(pm3d_shade.ambient-pm3d_shade.strength+shade_fact*pm3d_shade.strength);
-    tmp_b = b*(pm3d_shade.ambient-pm3d_shade.strength+shade_fact*pm3d_shade.strength);
+    tmp_r = r*(pm3d_shade.ambient - pm3d_shade.strength + shade_fact*pm3d_shade.strength);
+    tmp_g = g*(pm3d_shade.ambient - pm3d_shade.strength + shade_fact*pm3d_shade.strength);
+    tmp_b = b*(pm3d_shade.ambient - pm3d_shade.strength + shade_fact*pm3d_shade.strength);
 
     /* Specular highlighting */
     if (pm3d_shade.spec > 0.0) {
@@ -1533,9 +1578,41 @@ apply_lighting_model( struct coordinate *v0, struct coordinate *v1,
 	    tmp_g += pm3d_shade.spec * spec_fact;
 	    tmp_b += pm3d_shade.spec * spec_fact;
 	}
-	/* EXPERIMENTAL: Red spotlight from underneath */
-	if (dot_prod < 0 && pm3d_shade.spec2 > 0) {
-	    tmp_r += pm3d_shade.spec2 * spec_fact;
+    }
+
+    /* Optional extra light source
+     * The first spotlight was white and had fixed origin phi, psi.
+     * For this one "set pm3d spotlight ..." changes the color and origin,
+     * "set pm3d lighting spec2 <value>" controls the relative contribution.
+     */
+    if (pm3d_shade.spec2 > 0.0) {
+
+	double light2[3];
+	light2[0] = cos(-DEG2RAD*pm3d_shade.spec2_rot_x)*cos(-(DEG2RAD*pm3d_shade.spec2_rot_z));
+	light2[2] = cos(-DEG2RAD*pm3d_shade.spec2_rot_x)*sin(-(DEG2RAD*pm3d_shade.spec2_rot_z));
+	light2[1] = sin(-DEG2RAD*pm3d_shade.spec2_rot_x);
+
+	dot_prod = normal[0]*light2[0] + normal[1]*light2[1] + normal[2]*light2[2];
+
+	reflect[0] = -light2[0]+2*dot_prod*normal[0];
+	reflect[1] = -light2[1]+2*dot_prod*normal[1];
+	reflect[2] = -light2[2]+2*dot_prod*normal[2];
+	t = sqrt( reflect[0]*reflect[0] + reflect[1]*reflect[1] + reflect[2]*reflect[2] );
+	reflect[0] /= t;
+	reflect[1] /= t;
+	reflect[2] /= t;
+
+	dot_prod = -reflect[2];
+
+	spec_fact = pow(fabs(dot_prod), pm3d_shade.spec2_Phong);
+
+	if (dot_prod < 0) {
+	    tmp_r += pm3d_shade.spec2 * spec_fact
+			* ((pm3d_shade.spec2_rgb >> 16) & 0xff) / 255.;
+	    tmp_g += pm3d_shade.spec2 * spec_fact
+			* ((pm3d_shade.spec2_rgb >> 8) & 0xff) / 255.;
+	    tmp_b += pm3d_shade.spec2 * spec_fact
+			* ((pm3d_shade.spec2_rgb & 0xff)) / 255.;
 	}
     }
 
@@ -1555,14 +1632,18 @@ apply_lighting_model( struct coordinate *v0, struct coordinate *v1,
 
 
 /* The pm3d code works with gpdPoint data structures (double: x,y,z,color)
- * term->filled_polygon want gpiPoint data (int: x,y,style).
+ * term->filled_polygon wants gpiPoint data (int: x,y,style).
  * This routine converts from gpdPoint to gpiPoint
+ * The "index" parameter is an index into from_plot->zclip[]
+ * However if the polygon is from an object rather than a plot, "index"
+ * is really the fill style of that object.
  */
 static void
-filled_polygon(gpdPoint *corners, int fillstyle, int nv)
+filled_polygon(struct surface_points *from_plot, int index, gpdPoint *corners, int nv)
 {
     int i;
     double x, y;
+    int fillstyle;
 
     /* For normal pm3d surfaces and tessellation the constituent polygons
      * have a small number of vertices, usually 4.
@@ -1584,11 +1665,23 @@ filled_polygon(gpdPoint *corners, int fillstyle, int nv)
 	clipcorners = gp_realloc( clipcorners, (2*max_vertices) * sizeof(gpdPoint), "filled_polygon");
     }
 
-    if ((pm3d.clip == PM3D_CLIP_Z)
-    &&  (pm3d_plot_at != PM3D_AT_BASE && pm3d_plot_at != PM3D_AT_TOP)) {
-	int new = clip_filled_polygon( corners, clipcorners, nv );
-	if (new < 0)	/* All vertices out of range */
+    /* pm3d_plot_at is always 0 when we are called from pm3d depthorder
+     * processing so it cannot be used to distinguish top/bottom quadrangles
+     * (pm3d at [tb]) from surface quadrangles (pm3d at s).
+     * The original z values have been replaced by base_z or ceiling_z,
+     * so we can identify base plane quadrangles by testing for z == base_z.
+     * FIXME: However that means it is too late to get smooth z clipping for
+     *        the top/bottom plane contents.
+     */
+    if (pm3d.clip == PM3D_CLIP_Z) {
+	int new = 0;
+	if (corners[0].z == base_z)
+	    new = 0;
+	else
+	    new = clip_filled_polygon( from_plot, index, corners, clipcorners, nv );
+	if (new < 0) {	/* All vertices out of range */
 	    return;
+	}
 	if (new > 0) {	/* Some got clipped */
 	    nv = new;
 	    corners = clipcorners;
@@ -1608,6 +1701,16 @@ filled_polygon(gpdPoint *corners, int fillstyle, int nv)
 	clip_polygon( ocorners, icorners, nv, &nv );
     }
 
+    if (nv <= 0)
+	return;
+
+    /* If this polygon came from an object, the "index" is really a fill style.
+     * If it came from a plot, retrieve the style from the plot header.
+     */
+    if (from_plot)
+	fillstyle = style_from_fill(&from_plot->fill_properties);
+    else
+	fillstyle = index;
     if (fillstyle)
 	icorners[0].style = fillstyle;
     else if (default_fillstyle.fillstyle == FS_EMPTY)
@@ -1617,15 +1720,24 @@ filled_polygon(gpdPoint *corners, int fillstyle, int nv)
 
     term->filled_polygon(nv, icorners);
 
-    if (pm3d.border.l_type != LT_NODRAW) {
+    /* FIXME: Should this apply to other plot styles as well? */
+    /*        Should we apply a full set of line properties?  */
+    if (from_plot && from_plot->plot_style == BOXES) {
+	t_colorspec *bordercolor = &(from_plot->fill_properties.border_color);
+	if (bordercolor->type == TC_LT && bordercolor->lt == LT_NODRAW)
+	    return;
+	apply_pm3dcolor(bordercolor);
+    } else {
+	if (pm3d.border.l_type == LT_NODRAW)
+	    return;
 	/* LT_DEFAULT means draw border in current color (set pm3d border retrace) */
 	if (pm3d.border.l_type != LT_DEFAULT)
 	    term_apply_lp_properties(&pm3d.border);
+    }
 
-	term->move(icorners[0].x, icorners[0].y);
-	for (i = nv-1; i >= 0; i--) {
-	    term->vector(icorners[i].x, icorners[i].y);
-	}
+    term->move(icorners[0].x, icorners[0].y);
+    for (i = nv-1; i >= 0; i--) {
+	term->vector(icorners[i].x, icorners[i].y);
     }
 }
 
@@ -1636,7 +1748,8 @@ filled_polygon(gpdPoint *corners, int fillstyle, int nv)
  * Returns the new number of vertices after clipping.
  */
 int
-clip_filled_polygon( gpdPoint *inpts, gpdPoint *outpts, int nv )
+clip_filled_polygon( struct surface_points *from_plot, int index,
+		    gpdPoint *inpts, gpdPoint *outpts, int nv )
 {
     int current = 0;	/* The vertex we are now considering */
     int next = 0;	/* The next vertex */
@@ -1655,6 +1768,19 @@ clip_filled_polygon( gpdPoint *inpts, gpdPoint *outpts, int nv )
 	maxvert = nv;
 	outrange = gp_realloc(outrange, maxvert * sizeof(int), NULL);
     }
+    if (zmin > zmax) {
+	zmax = axis_array[FIRST_Z_AXIS].min;
+	zmin = axis_array[FIRST_Z_AXIS].max;
+    }
+
+    /* clipping limits used by pm3d zclip and CONTOURFILL*/
+    if (from_plot && from_plot->zclip) {
+	if (zmin < from_plot->zclip[index].zlow)
+	    zmin = from_plot->zclip[index].zlow;
+	if (zmax > from_plot->zclip[index].zhigh)
+	    zmax = from_plot->zclip[index].zhigh;
+    }
+
     for (current = 0; current < nv; current++) {
 	if (inrange( inpts[current].z, zmin, zmax )) {
 	    outrange[current] = 0;
@@ -1736,7 +1862,7 @@ clip_filled_polygon( gpdPoint *inpts, gpdPoint *outpts, int nv )
 }
 
 
-/* EXPERIMENTAL
+/*
  * returns 1 for top of pm3d surface towards the viewer
  *        -1 for bottom of pm3d surface towards the viewer
  * NB: the ordering of the quadrangle vertices depends on the scan direction.
@@ -1762,6 +1888,32 @@ pm3d_side( struct coordinate *p0, struct coordinate *p1, struct coordinate *p2)
 
     /* cross-product */
     return sgn(u0*v1 - u1*v0);
+}
+
+/*
+ * Check required number of new quadrangles against current allocation.
+ * If necessary, reallocate list of quadrangles.
+ * By default extend to double the current list size, non-zero chunk
+ * provides a different extension increment.
+ */
+TBOOLEAN
+reserve_quadrangles( int needed, int chunk )
+{
+    int newsize = allocated_quadrangles;
+    int increment = (chunk > 0) ? chunk : allocated_quadrangles;
+
+    if (increment == 0)
+	increment = 100;
+
+    while (current_quadrangle + needed >= newsize)
+	newsize += increment;
+    if (newsize == allocated_quadrangles)
+	return FALSE;
+
+    quadrangles = gp_realloc(quadrangles, newsize * sizeof(quadrangle),
+			"extend_quadrangles");
+    allocated_quadrangles = newsize;
+    return TRUE;
 }
 
 /*
@@ -1797,4 +1949,248 @@ pm3d_reset_after_error()
 {
     pm3d_plot_at = 0;
     free_polygonlist();
+}
+
+/*
+ * Ethan Merritt Sep 2021
+ * When two pm3d surfaces intersect, the intersection line is jagged because
+ * a decision is forced for each quadrangle it runs through.  One of the two 
+ * surfaces is treated as the "top" for the purpose of assigning a drawing
+ * order, and the entire tile is drawn, occluding part of the other one.
+ * This code implements a smoother treatment. Instead of picking one tile or
+ * the other, both are split into two pieces sharing the true intersection
+ * line as a new edge.
+ * NOTES:
+ * -	We only handle gridded surfaces where the intersecting rectangular
+ *	tiles share [x,y] coordinates at all four corners. Each such tile is
+ *	split into either two new rectangles or a triangle plus a pentagon.
+ */
+
+/*
+ * The sort on x/y is imperfect because we use the coords from only
+ * one of the four corners.  Remember that the other corners may
+ * be +/- one grid spacing.
+ */
+static int
+compare_xy_quad(SORTFUNC_ARGS arg1, SORTFUNC_ARGS arg2)
+{
+    const quadrangle* q1 = arg1;
+    const quadrangle* q2 = arg2;
+
+    if (q1->vertex.corners[0].x > q2->vertex.corners[0].x) return  1;
+    if (q1->vertex.corners[0].x < q2->vertex.corners[0].x) return -1;
+    if (q1->vertex.corners[0].y > q2->vertex.corners[0].y) return  1;
+    if (q1->vertex.corners[0].y < q2->vertex.corners[0].y) return -1;
+    return 0;
+}
+
+#define xy_same(q1,q2) \
+   ((fabs(q1->vertex.corners[0].x - q2->vertex.corners[0].x) < x_tolerance) \
+&&  (fabs(q1->vertex.corners[1].x - q2->vertex.corners[1].x) < x_tolerance) \
+&&  (fabs(q1->vertex.corners[2].x - q2->vertex.corners[2].x) < x_tolerance) \
+&&  (fabs(q1->vertex.corners[3].x - q2->vertex.corners[3].x) < x_tolerance) \
+&&  (fabs(q1->vertex.corners[0].y - q2->vertex.corners[0].y) < y_tolerance) \
+&&  (fabs(q1->vertex.corners[1].y - q2->vertex.corners[1].y) < y_tolerance) \
+&&  (fabs(q1->vertex.corners[2].y - q2->vertex.corners[2].y) < y_tolerance) \
+&&  (fabs(q1->vertex.corners[3].y - q2->vertex.corners[3].y) < y_tolerance))
+
+#define too_far(q1,q2) \
+    (fabs(q2->vertex.corners[0].x - q1->vertex.corners[0].x) > 2.*x_spacing)
+
+static void
+find_intersection( gpdPoint *v1, gpdPoint *v2, gpdPoint *v3, gpdPoint *v4,
+                   gpdPoint *intersection )
+{
+    double t = fabs((v3->z - v1->z) / ((v1->z - v2->z) - (v3->z -v4->z)));
+    intersection->x = v1->x + t * (v2->x - v1->x);
+    intersection->y = v1->y + t * (v2->y - v1->y);
+    intersection->z = v1->z + t * (v2->z - v1->z);
+}
+
+static void
+split_intersecting_surface_tiles()
+{
+    quadrangle *q1, *q2, *qnew;
+    int iq1, iq2;
+    int s0, s1, s2, s3;		/* -1 = bottom surface; 0 = intersection; 1 = top surface */
+    int nv1, nv2;		/* number of vertices in piece1, piece2 */
+    gpdPoint *ptlist[8];	/* list of 4 vertices of q1 plus possible intersections */
+    int side[8];		/* top/bottom/intersection status of points in ptlist */
+    gpdPoint intersection[2];	/* We know there are only two intersections */
+    gpdPoint piece1[5], piece2[5];
+    int pass;
+
+    /* These calculations all assume a simple grid shared by all plots in the superposition */
+    double x_spacing = fabs(axis_array[U_AXIS].max -axis_array[U_AXIS].min)/(samples_1-1);
+    double y_spacing = fabs(axis_array[V_AXIS].max -axis_array[V_AXIS].min)/(iso_samples_1-1);
+    double x_tolerance = x_spacing * 1.e-8;
+    double y_tolerance = y_spacing * 1.e-8;
+
+    if (!current_quadrangle || !quadrangles)
+	return;
+
+    /* Sort quadrangles on x and y */
+    gp_qsort(quadrangles, current_quadrangle, sizeof(quadrangle), compare_xy_quad);
+
+    /* Step through the list of quadrangles.
+     * For each quadrangle look ahead to find another with the same [x,y] corners.
+     * Check this pair for intersection along z.
+     * If no, proceed to next in list.
+     * If yes, split each of them into two new 'quadrangles' (may be triangle or pentagon)
+     */
+    for (iq1 = 1; iq1 < current_quadrangle; iq1++) {
+	q1 = &(quadrangles[iq1]);
+	if (q1->type != QUAD_TYPE_NORMAL)
+	    continue;
+	for (iq2 = iq1+1; iq2 < current_quadrangle; iq2++) {
+	    q2 = &(quadrangles[iq2]);
+	    if (q2->type != QUAD_TYPE_NORMAL)
+		continue;
+	    if (too_far(q1,q2))
+		break;
+	    if (!xy_same(q1,q2))
+		continue;
+
+	    s0 = (q1->vertex.corners[0].z - q2->vertex.corners[0].z) >= 0 ? 1 : -1;
+	    s1 = (q1->vertex.corners[1].z - q2->vertex.corners[1].z) >= 0 ? 1 : -1;
+	    s2 = (q1->vertex.corners[2].z - q2->vertex.corners[2].z) >= 0 ? 1 : -1;
+	    s3 = (q1->vertex.corners[3].z - q2->vertex.corners[3].z) >= 0 ? 1 : -1;
+	    if (s0 > 0 && s1 > 0 && s2 > 0 && s3 > 0)
+		continue;
+	    if (s0 < 0 && s1 < 0 && s2 < 0 && s3 < 0)
+		continue;
+
+	    /* Found a pair of intersecting quadrangles!
+	     * Make sure the list is long enough to hold new pieces.
+	     */
+	    if (reserve_quadrangles(4, 4*samples_1)) {
+		q1 = &(quadrangles[iq1]);
+		q2 = &(quadrangles[iq2]);
+	    }
+
+	    /* Construct a list of pointers to the 4 original vertices of q1
+	     * and to the 2 intersection points.  We don't yet know which sides
+	     * the intersections lie on, so we leave room for 2 NULL pointers
+	     * corresponding to the sides with no intersection.
+	     */
+	    ptlist[1] = ptlist[3] = ptlist[5] = ptlist[7] = NULL;
+	    side[1] = side[3] = side[5] = side[7] = 0;
+	    side[0] = s0;
+	    side[2] = s1;
+	    side[4] = s2;
+	    side[6] = s3;
+
+	    for (pass = 1; pass <= 2; pass++) {
+		quadrangle *qt = (pass==1) ? q1 : q2;
+		quadrangle *qb = (pass==1) ? q2 : q1;
+		int next_int = 0;
+		int i;
+
+		ptlist[0] = &qt->vertex.corners[0];
+		ptlist[2] = &qt->vertex.corners[1];
+		ptlist[4] = &qt->vertex.corners[2];
+		ptlist[6] = &qt->vertex.corners[3];
+		if (s0*s1 != 1) {
+		    find_intersection(&(qb->vertex.corners[0]), &(qb->vertex.corners[1]),
+				      &(qt->vertex.corners[0]), &(qt->vertex.corners[1]),
+				      &intersection[next_int]);
+		    ptlist[1] = &intersection[next_int++];
+		}
+		if (s1*s2 != 1) {
+		    find_intersection(&(qb->vertex.corners[1]), &(qb->vertex.corners[2]),
+				      &(qt->vertex.corners[1]), &(qt->vertex.corners[2]),
+				      &intersection[next_int]);
+		    ptlist[3] = &intersection[next_int++];
+		}
+		if (s2*s3 != 1) {
+		    find_intersection(&(qb->vertex.corners[2]), &(qb->vertex.corners[3]),
+				      &(qt->vertex.corners[2]), &(qt->vertex.corners[3]),
+				      &intersection[next_int]);
+		    ptlist[5] = &intersection[next_int++];
+		}
+		if (s3*s0 != 1) {
+		    find_intersection(&(qb->vertex.corners[3]), &(qb->vertex.corners[0]),
+				      &(qt->vertex.corners[3]), &(qt->vertex.corners[0]),
+				      &intersection[next_int]);
+		    ptlist[7] = &intersection[next_int++];
+		}
+		/* Should never happen */
+		if (next_int != 2)
+		    int_error(NO_CARET, "calculation of surface intersection failed n=%d", next_int);
+
+		/* Copy the "top" vertices to piece1, "bottom" to piece2 */
+		nv1 = nv2 = 0;
+		for (i=0; i<8; i++) {
+		    if (ptlist[i] != NULL && side[i] >= 0)
+			piece1[nv1++] = *ptlist[i];
+		    if (ptlist[i] != NULL && side[i] <= 0)
+			piece2[nv2++] = *ptlist[i];
+		}
+
+		/* Add piece1 as a new quadrangle at the end of the list */
+		if (nv1 > 2) {
+		    qnew = &quadrangles[current_quadrangle++];
+		    qnew->from_plot = qt->from_plot;
+		    qnew->gray = qt->gray;
+		    qnew->index = qt->index;
+		    qnew->qcolor = qt->qcolor;
+#ifdef WITH_2ND_SORTKEY
+		    qnew->sequence = qt->sequence;
+#endif
+
+		    qnew->vertex.corners[0] = piece1[0];
+		    qnew->vertex.corners[1] = piece1[1];
+		    qnew->vertex.corners[2] = piece1[2];
+		    qnew->vertex.corners[3] = piece1[3];
+		    qnew->type = QUAD_TYPE_4SIDES;
+		    if (nv1 == 3) {
+			qnew->vertex.corners[3] = piece1[2];
+			qnew->type = QUAD_TYPE_TRIANGLE;
+		    }
+		    if (nv1 == 5) {
+			gpdPoint *save_corners = get_polygon(nv1);
+			qnew->vertex.array_index = current_polygon;
+			memcpy(save_corners, piece1, nv1 * sizeof(gpdPoint));
+			save_corners[2].c = nv1;
+			qnew->type = QUAD_TYPE_LARGEPOLYGON;
+		    }
+		}
+
+		/* Add piece2 as a new quadrangle at the end of the list */
+		if (nv2 > 2) {
+		    qnew = &quadrangles[current_quadrangle++];
+		    qnew->from_plot = qt->from_plot;
+		    qnew->gray = qt->gray;
+		    qnew->index = qt->index;
+		    qnew->qcolor = qt->qcolor;
+#ifdef WITH_2ND_SORTKEY
+		    qnew->sequence = qt->sequence;
+#endif
+
+		    qnew->vertex.corners[0] = piece2[0];
+		    qnew->vertex.corners[1] = piece2[1];
+		    qnew->vertex.corners[2] = piece2[2];
+		    qnew->vertex.corners[3] = piece2[3];
+		    qnew->type = QUAD_TYPE_4SIDES;
+		    if (nv2 == 3) {
+			qnew->vertex.corners[3] = piece2[2];
+			qnew->type = QUAD_TYPE_TRIANGLE;
+		    }
+		    if (nv2 == 5) {
+			gpdPoint *save_corners = get_polygon(nv2);
+			qnew->vertex.array_index = current_polygon;
+			qnew->type = QUAD_TYPE_LARGEPOLYGON;
+			memcpy(save_corners, piece2, nv2 * sizeof(gpdPoint));
+			save_corners[2].c = nv2;
+		    }
+		}
+	    }
+
+	    /* Mark original q1 and q2 as not to be drawn */
+	    q1->type = QUAD_TYPE_SKIP;
+	    q2->type = QUAD_TYPE_SKIP;
+	    break;
+	}
+    }
+
 }

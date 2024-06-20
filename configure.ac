@@ -5,14 +5,14 @@ dnl NB: Change version/patchlevel immediately below
 dnl     and also in PATCHLEVEL and src/version.c
 dnl
 
-AC_INIT(gnuplot, 5.4.4)
+AC_INIT(gnuplot, 6.0.0)
 
 AC_CONFIG_SRCDIR(src/graphics.c)
 AC_PREREQ([2.69])
 AC_CONFIG_HEADERS(config.h:config.hin)
 
 dnl The line below is for use during development
-dnl AC_DEFINE(DEVELOPMENT_VERSION,1,[Provide contact info for gnuplot develoment])
+dnl AC_DEFINE(DEVELOPMENT_VERSION,1,[Provide timestamp for gnuplot develoment])
 dnl The line below is for packaging a release version
 AM_CONDITIONAL([DEVELOPMENT_VERSION], false)
 
@@ -20,7 +20,7 @@ AM_INIT_AUTOMAKE([1.10 subdir-objects])
 
 AM_MAINTAINER_MODE
 
-VERSION_MAJOR="5.4"
+VERSION_MAJOR="6.0"
 PATCHLEVEL="`cat $srcdir/PATCHLEVEL`"
 AC_DEFINE_UNQUOTED(VERSION_MAJOR,["$VERSION_MAJOR"],[The main version number])
 AC_DEFINE_UNQUOTED(PATCHLEVEL,["$PATCHLEVEL"],[The patch level, a.k.a. micro version number])
@@ -113,6 +113,35 @@ if test "${with_libcerf}" = yes ; then
   )
 fi
 
+AC_ARG_WITH(amos,dnl
+[  --with-amos[=DIR]         location of libamos or libopenspecfun (complex functions)],,
+  with_amos=yes)
+
+if test -d "$with_amos"; then
+  LIBAMOS_LDFLAGS=-L$with_amos
+fi
+
+if test "${with_amos}" != no ; then
+  _ldflags="$LDFLAGS"
+  LDFLAGS="$LDFLAGS $LIBAMOS_LDFLAGS"
+  AC_MSG_CHECKING( for amos libraries using LDFLAGS: $LDFLAGS )
+
+  dnl The Amos routines (D. E. Amos, Sandia National Laboratories) calculate
+  dnl Bessel and related functions with complex argument and nonnegative order.
+  dnl These routines exist in various library packages including libopenspecfun.
+  AC_SEARCH_LIBS([zairy_], [amos openspecfun],
+      [AC_DEFINE([HAVE_AMOS], 1, [define if you have a library of Amos special functions])
+      have_amoslibrary=yes]
+  )
+  dnl The Amos routine cexint (Complex exponential integral) is not in the general
+  dnl collection of Bessel functions so it may or may not be present in the same
+  dnl library as the others.
+  AC_SEARCH_LIBS([cexint_], [amos openspecfun],
+      [AC_DEFINE([HAVE_CEXINT], 1, [define if you have Amos function cexint])
+      have_cexint=yes && LIBS="$LIBS -L/home/local/lib64"]
+  )
+fi
+
 dnl Various programs
 dnl X/Emacs for building .texi version of docs
 test x"$EMACS" = xt && EMACS=
@@ -132,8 +161,6 @@ else
 fi
 AM_CONDITIONAL(HAVE_LATEX, test "$with_latex" != no)
 AC_CHECK_PROGS(DVIPS, dvips, no)
-AC_CHECK_PROGS(TROFF, troff, no)
-AC_CHECK_PROGS(LATEX2HTML, latex2html, no)
 
 AC_ARG_WITH(texdir,dnl
   [--with-texdir=DIR       where to install latex style files (default: ask kpsewhich)],
@@ -193,7 +220,7 @@ AM_CONDITIONAL(BUILD_SRC_BEOS_SUBDIR, test x$build_beos_subdir = xyes)
 dnl _instead_ of -lm ...
 AC_CHECK_FUNC(sin,,[AC_CHECK_LIB(m,sin)])
 
-dnl Header files
+dnl Header files. ANSI first
 dnl AC_HEADER_STDC
 AC_CHECK_HEADERS(dirent.h errno.h float.h langinfo.h limits.h locale.h math.h \
   stdlib.h string.h time.h sys/time.h sys/types.h \
@@ -267,10 +294,11 @@ AC_CHECK_FUNCS(atexit memcpy memmove memset \
   on_exit bcopy bzero \
   setvbuf strerror strchr strrchr strstr \
   index rindex \
-  erf erfc gamma lgamma tgamma jn \
+  erf erfc gamma lgamma tgamma \
   getcwd poll pclose popen fdopen select sleep stpcpy \
   strcspn strdup strndup strnlen strcasecmp stricmp strncasecmp strnicmp \
-  sysinfo tcgetattr vfprintf doprnt uname usleep
+  sysinfo tcgetattr vfprintf doprnt uname usleep \
+  cbrt jn
 )
 
 dnl HBB 20030624: see if signgam is declared by math.h
@@ -279,6 +307,13 @@ AC_CHECK_DECLS([signgam],,,
 #include <math.h>
 #endif
 ])
+
+dnl check for C99 complex types
+dnl and minimal set of complex math functions
+AC_CHECK_HEADERS(complex.h)
+AC_CHECK_FUNCS(csqrt cexp cabs clog)
+dnl check for C99 floating point exception handling
+AC_CHECK_HEADERS(fenv.h)
 
 dnl check, if we have sigsetjmp and siglongjmp.
 dnl a trivial AC_CHECK_FUNCS(sigsetjmp) won't do
@@ -323,36 +358,6 @@ AC_ARG_WITH(gihdir,dnl
                           (default PREFIX/share/PACKAGE/VERSION)],
   GIHDIR="$withval",
   GIHDIR="$pkgdatadir/$VERSION_MAJOR")
-
-dnl TODO: simplify, update ggi support
-dnl new ggi driver
-GGI_SUPPORT=no
-AC_ARG_WITH(ggi,dnl
-[  --with-ggi[=DIR]          enable the ggi driver],
-  [if test "$withval" != no; then
-     if test -d $withval/include; then
-       CPPFLAGS="$CPPFLAGS -I$withval/include"
-     fi
-     if test -d $withval/lib; then
-       LDFLAGS="$LDFLAGS -L$withval/lib"
-     fi
-     AC_CHECK_LIB(ggi,ggiInit,
-       [TERMLIBS="-lggi $TERMLIBS"
-        AC_DEFINE(USE_GGI_DRIVER,1,
-                  [ Define this to build the General Graphics Interface (ggi) driver. ])
-        GGI_SUPPORT=yes
-	dnl check for customized libxmi (xmiInit not in normal libxmi)
-        AC_CHECK_LIB(xmi,xmiInit,
-          [TERMLIBS="-lxmi $TERMLIBS"
-           AC_CHECK_HEADERS(ggi/xmi.h)])
-        dnl check if libggiwmh and ggi/wmh.h are found
-        AC_CHECK_LIB(ggiwmh,ggiWmhInit,
-          [TERMLIBS="-lggiwmh $TERMLIBS"
-           AC_CHECK_HEADERS(ggi/wmh.h,,
-             AC_MSG_WARN([found ggiwmh library but not ggi/wmh.h
-please add path to ggi/wmh.h to CPPFLAGS in Makefile]))
-          ])])
-   fi])
 
 dnl Use builtin readline or GNU readline or NetBSD editline
 AC_ARG_WITH(readline,dnl
@@ -506,6 +511,19 @@ please add path to history.h to CPPFLAGS in Makefile]))
 fi
 dnl end readline
 
+dnl the "qsort" provided by macOS is not stable (items that evaluate equal are not
+dnl guaranteed to retain their original ordering).
+dnl This option allows you to replace it with mergesort, if found,
+dnl or add code in gnuplot to make the sort stable with respect to pm3d depthorder
+AC_CHECK_FUNCS(mergesort, have_stable_sort=yes)
+AC_CHECK_FUNCS(gnu_get_libc_version, have_stable_sort=yes)
+AC_ARG_ENABLE(stable-sort, dnl
+[  --enable-stable-sort    guarantee that pm3d depth-sorting retains object order],
+  [AC_DEFINE(WITH_STABLE_SORT,1,
+             [ Define if qsort on your O/S is unstable and that bothers you. ])
+  ]
+  ,)
+
 dnl check presence of z library
 dnl TODO: path to zlib includes; -lz -lm specified multiple times
 dnl       we don't do anything about missing png/gd includes either
@@ -521,30 +539,22 @@ dnl check presence of gd library
 dnl we don't check for libfreetype and libjpeg locations - if gd requires
 dnl them, the gdlib-config script or the gdlibc.pc contains all the required information
 AC_ARG_WITH(gd,dnl
-[  --with-gd[=DIR]           location of gd library (png jpeg gif terminals)],,
+[  --with-gd[=DIR]           (DIR is location of include/gd.h and lib/libgd.so)],,
   with_gd=yes)
 
-if test "$with_gd" != no; then
-  PKG_CHECK_MODULES_NOFAIL(libgd, [gdlib])
-  AC_PATH_PROG([GDLIB_CONFIG], [gdlib-config])
+if test -d "$with_gd"; then
+  libgd_LDFLAGS=-L$with_gd/lib
+  libgd_CFLAGS=-I$with_gd/include
+  libgd_LIBS=-lgd
+  AC_MSG_WARN(([Looking for $with_gd/include/gd.h and $with_gd/lib/libgd.so]))
 
+elif test "$with_gd" != no; then
+  PKG_CHECK_MODULES_NOFAIL(libgd, [gdlib])
   # If pkg-config did return libgd configuration then
   # libgd_{CFLAGS,LDFLAGS,LIBS} is set
-  # If gdlib-config executable is found then GDLIB_CONFIG is set
-  if test $pkg_failed = no && test -n "$GDLIB_CONFIG"; then
-    # If pkg-config did succeed and we have gdlib-config then the later takes
-    # priority
-    libgd_CFLAGS=`$GDLIB_CONFIG --cflags`
-    libgd_LDFLAGS=`$GDLIB_CONFIG --ldflags`
-    libgd_LIBS=`$GDLIB_CONFIG --libs`
-  elif test -d "$with_gd"; then
-    # pkg-config did NOT succeed, we do NOT have gdlib-config but user
-    # specified --with-gd=
-    libgd_CFLAGS="-I$with_gd/include"
-    libgd_LDFLAGS="-L$with_gd/lib"
-    libgd_LIBS="-ljpeg -lpng -lfreetype -lz"
-  fi
+fi
 
+if test "$with_gd" != no; then
   # Verify that libgd works, but backup the previous compilation variables to
   # be able to revert in the case that libgd is not functional
   _cppflags="$CPPFLAGS"
@@ -705,23 +715,21 @@ dnl end caca
 
 dnl Process rest of with and enable options
 
-dnl Use .gnuplot file in current directory
-AC_ARG_WITH(cwdrc,dnl
-[  --with-cwdrc            check current directory for .gnuplot file,
-                          normally disabled for security reasons],,)
-if test "$with_cwdrc" = yes; then
-     AC_DEFINE(USE_CWDRC,1,
-               [ Define if you want to read .gnuplot from current directory (SECURITY RISK!).])
+dnl without-extra-coordinate may leave a hole in "struct coordinate"
+AC_ARG_WITH(extra-coordinate,dnl
+[  --without-extra-coordinate    leave possible hole in struct coordinate],,)
+if test "$with_extra_coordinate" != no; then
+     AC_DEFINE(WITH_EXTRA_COORDINATE,1,
+               [ Define to make use of otherwise empty space in struct coordinate ])
 fi
 
-dnl Sort help/subtopic tables by row or column
-AC_ARG_WITH(row-help,dnl
-[  --with-row-help         format help and subtopic tables by row (default)
-  --without-row-help      format help and subtopic tables by column],
-  [if test "$with_row_help" = no; then
-     AC_DEFINE(COLUMN_HELP,1,
-               [ Define if you want online help and subtopic tables sorted by column. ])
-   fi])
+dnl EXPERIMENTAL support for concave hulls via Delaunay triangulation and chi-shapes
+AC_ARG_ENABLE(chi-shapes,dnl
+[  --disable-chi-shapes    no support for Delaunay triangulation or chi-shapes],,)
+if test "$enable_chi_shapes" != no; then
+    AC_DEFINE(WITH_CHI_SHAPES,1,
+              [ Define to support Delaunay triangulation and chi-shapes ])
+fi
 
 dnl enable multi-byte font support in x11 terminal
 AC_ARG_ENABLE(x11-mbfonts,dnl
@@ -906,12 +914,19 @@ AS_IF([test "x${with_tgif}" = "xyes"],
   AC_DEFINE(HAVE_TGIF,1,
           [ Define to include support for tgif terminal ],))
 
-dnl  Allow to include mif (FrameMaker 3) terminal
-AC_ARG_WITH(mif,dnl
-[  --with-mif               mif terminal (FrameMaker 3)])
-AS_IF([test "x${with_mif}" = "xyes"],
-  AC_DEFINE(HAVE_MIF,1,
-          [ Define to include support for mif terminal ],))
+dnl  Allow to include metafont terminal
+AC_ARG_WITH(metafont,dnl
+[  --with-metafont          metafont terminal])
+AS_IF([test "x${with_metafont}" = "xyes"],
+  AC_DEFINE(HAVE_METAFONT,1,
+          [ Define to include support for metafont terminal ],))
+
+dnl  Allow to include metapost terminal
+AC_ARG_WITH(metapost,dnl
+[  --with-metapost          metapost terminal])
+AS_IF([test "x${with_metapost}" = "xyes"],
+  AC_DEFINE(HAVE_METAPOST,1,
+          [ Define to include support for metapost terminal ],))
 
 dnl ReGIS terminal
 AC_ARG_WITH(regis,dnl
@@ -952,6 +967,30 @@ fi
 
 AM_CONDITIONAL(BUILD_GPCAIRO, test "${build_gpcairo}" = yes)
 
+dnl webp terminal
+if test "${with_cairo}" = yes; then
+  with_webp=yes
+  PKG_CHECK_MODULES_NOFAIL(WEBP, [libwebp libwebpmux],
+      [
+      CPPFLAGS="$CPPFLAGS $WEBP_CFLAGS"
+      TERMLIBS="$TERMLIBS $WEBP_LIBS"
+      AC_DEFINE(HAVE_WEBP,1, [ Define to build the webp terminal. ])
+      ],
+      with_webp=no
+  )
+fi
+
+dnl Enable polar mode gridded surface plots
+AC_ARG_ENABLE(polar-grid,dnl
+[  --enable-polar-grid     include support for gridded polar surface plots],
+  [if test "$enableval" != no; then
+    AC_DEFINE(USE_POLAR_GRID,1,
+               [ Define to support polar gridded surface plots])
+   fi],
+    AC_DEFINE(USE_POLAR_GRID,1,
+               [ Define to support polar gridded surface plots])
+  )
+
 dnl Enable subsystem to generate statistical summary of file contents
 AC_ARG_ENABLE(stats,dnl
 [  --disable-stats         Omit calculation of statistical summary of data],
@@ -963,13 +1002,35 @@ AC_ARG_ENABLE(stats,dnl
                [ Define to add support for generating a statistical summary of data])
    )
 
-dnl Enable parsing of deprecated syntax
-dnl AC_ARG_ENABLE(backwards-compatibility,dnl
-dnl [  --enable-backwards-compatibility       enable deprecated syntax ],
-dnl   [if test "$enableval" = yes; then
-dnl     AC_DEFINE(BACKWARDS_COMPATIBLE,1,
-dnl                [ Define to allow use of certain deprecated syntax. ])
-dnl   fi])
+dnl Enable subsystem to set watchpoints that trigger during 2D plotting
+AC_ARG_ENABLE(watchpoints,dnl
+[  --enable-watchpoints    include support for setting watchpoints in 2D plots],
+  [if test "$enableval" != no; then
+    AC_DEFINE(USE_WATCHPOINTS,1,
+               [ Define to support setting watchpoints in 2D plots])
+   fi],
+    AC_DEFINE(USE_WATCHPOINTS,1,
+               [ Define to support setting watchpoints in 2D plots])
+   )
+
+dnl Enable callable blocks of gnuplot code treated as functions
+AC_ARG_ENABLE(function-blocks,dnl
+[  --enable-function-blocks include support for defining a function as a here document],
+  [if test "$enableval" != no; then
+    AC_DEFINE(USE_FUNCTIONBLOCKS, 1,
+               [ Define to support defining a function as a here document])
+   fi],
+    AC_DEFINE(USE_FUNCTIONBLOCKS, 1,
+               [ Define to support defining a function as a here document])
+   )
+
+Enable parsing of deprecated syntax
+AC_ARG_ENABLE(backward-compatibility,dnl
+[  --enable-backward-compatibility       enable some deprecated syntax ],
+  [if test "$enableval" = yes; then
+    AC_DEFINE(BACKWARD_COMPATIBILITY,1,
+               [ Define to allow use of some deprecated syntax. ])
+  fi])
 
 dnl Qt terminal
 
@@ -990,29 +1051,61 @@ if test "${enable_qt}" = yes ; then
       enable_qt_ok=no
   fi
 
-  dnl First check for Qt5
-  if test "x${with_qt}" = "xqt5"; then
-    try_qt4=no
-  else
+  dnl Qt4 only by special request
+  if test "x${with_qt}" = "xqt4"; then
     try_qt4=yes
+  else
+    try_qt4=no
   fi
+
   if test "x${with_qt}" != "xqt4"; then
-    PKG_CHECK_MODULES_NOFAIL(QT, [Qt5Core Qt5Gui Qt5Network Qt5Svg Qt5PrintSupport])
+    pkg_failed="not_tried"
+    if test "x${with_qt}" != "xqt5"; then
+      AC_MSG_CHECKING([Checking for Qt6 support libraries])
+      PKG_CHECK_MODULES_NOFAIL(QT, [Qt6Core Qt6Gui Qt6Network Qt6Svg Qt6PrintSupport Qt6Core5Compat])
+    fi
     if test $pkg_failed = no; then
-      try_qt4=no
-      QT5LOC=`$PKG_CONFIG --variable=host_bins Qt5Core`
-      if test "x${QT5LOC}" != "x"; then
-        UIC=${QT5LOC}/uic
-        MOC=${QT5LOC}/moc
-        RCC=${QT5LOC}/rcc
-        LRELEASE=${QT5LOC}/lrelease
+      QT6LOC=`$PKG_CONFIG --variable=libexecdir Qt6Core`
+      if test "x${QT6LOC}" != "x"; then
+          UIC=${QT6LOC}/uic
+          MOC=${QT6LOC}/moc
+          RCC=${QT6LOC}/rcc
+      elif test "x${UIC}" = "x"; then
+          UIC=uic-qt6
+          MOC=moc-qt6
+          RCC=rcc-qt6
       fi
+      QT6BIN=`$PKG_CONFIG --variable=bindir Qt6Core`
+      if test "x${QT6BIN}" != "x"; then
+          LRELEASE=${QT6BIN}/lrelease
+      elif test "x${LRELEASE}" = "x"; then
+          LRELEASE=lrelease-qt6
+      fi
+
       CXXFLAGS="$CXXFLAGS -fPIC"
+      AC_MSG_RESULT([The Qt terminal will use Qt6.])
+      QTVER="6"
+    else
+      AC_MSG_CHECKING([Checking for Qt5 support libraries])
+      PKG_CHECK_MODULES_NOFAIL(QT, [Qt5Core Qt5Gui Qt5Network Qt5Svg Qt5PrintSupport])
+      if test $pkg_failed = no; then
+        QT5LOC=`$PKG_CONFIG --variable=host_bins Qt5Core`
+        if test "x${QT5LOC}" != "x"; then
+          UIC=${QT5LOC}/uic
+          MOC=${QT5LOC}/moc
+          RCC=${QT5LOC}/rcc
+          LRELEASE=${QT5LOC}/lrelease
+        fi
+        CXXFLAGS="$CXXFLAGS -fPIC"
+        AC_MSG_RESULT([The Qt terminal will use Qt5.])
+        QTVER="5"
+      fi
     fi 
   fi
 
-  dnl No Qt5, check for Qt4.5 or greater
-  if test ${try_qt4} != no; then
+  dnl Explicit request for qt4 
+  if test ${try_qt4} = yes; then
+    AC_MSG_CHECKING([Checking for Qt4 support])
     PKG_CHECK_MODULES_NOFAIL(QT, [QtCore >= 4.5 QtGui >= 4.5 QtNetwork >= 4.5 QtSvg >= 4.5])
     if test $pkg_failed != no; then
       enable_qt_ok=no
@@ -1026,9 +1119,6 @@ if test "${enable_qt}" = yes ; then
       AC_MSG_RESULT([The Qt terminal will use Qt4.])
       QTVER="4"
     fi
-  else
-    AC_MSG_RESULT([The Qt terminal will use Qt5.])
-    QTVER="5"
   fi
 fi
 
@@ -1101,6 +1191,7 @@ AC_SUBST(GIHDIR)
 AC_SUBST(TEXDIR)
 AC_SUBST(TERMLIBS)
 AC_SUBST(TERMXLIBS)
+dnl AC_SUBST(TUTORIAL)
 
 dnl Write Makefiles and configuration header
 AC_CONFIG_FILES([Makefile
@@ -1110,13 +1201,15 @@ AC_CONFIG_FILES([Makefile
            docs/Makefile
            m4/Makefile
            man/Makefile
+           man/ja/Makefile
            share/Makefile
            share/LaTeX/Makefile
            src/Makefile
            src/beos/Makefile
            src/wxterminal/Makefile
            src/qtterminal/Makefile
-           term/Makefile])
+           term/Makefile
+           ])
 AC_CONFIG_COMMANDS([default],[test -z "$CONFIG_HEADERS" || echo timestamp >stamp-h],[])
 AC_OUTPUT
 
@@ -1136,172 +1229,168 @@ AC_MSG_RESULT([gnuplot will be compiled with the following terminals:])
 AC_MSG_RESULT([])
 
 AC_MSG_RESULT([  Standalone terminals: yes (included by default)])
-AC_MSG_RESULT([    canvas, cgm, context, dumb, dxf, emf, epslatex,])
-AC_MSG_RESULT([    fig, hpgl, metafont, metapost, pcl5, postscript,])
-AC_MSG_RESULT([    pict2e, pslatex, pstex, pstricks, svg, texdraw, tkcanvas])
+AC_MSG_RESULT([    canvas cgm context dumb dxf emf epslatex])
+AC_MSG_RESULT([    fig hpgl pcl5 postscript])
+AC_MSG_RESULT([    pict2e pslatex pstex pstricks svg texdraw tkcanvas])
 AC_MSG_RESULT([])
 
 if test "$with_bitmap_terminals" = yes; then
-  AC_MSG_RESULT([  dot-matrix terminals: yes ( --without-bitmap-terminals to disable)])
+  AC_MSG_RESULT([  Dot-matrix terminals: yes ( --without-bitmap-terminals to disable)])
 else
-  AC_MSG_RESULT([  dot-matrix terminals: no (use --with-bitmap-terminals to enable)])
+  AC_MSG_RESULT([  Dot-matrix terminals: no (use --with-bitmap-terminals to enable)])
+  AC_MSG_RESULT([  These would include, if enabled])
 fi
-AC_MSG_RESULT([    epson, nec, okidata, tandy, and seiko dp414 printers])
-AC_MSG_RESULT([    hp500c, hpdj, hpljii, hppj, pbm, sixel, starc])
+AC_MSG_RESULT([    printers: epson nec okidata tandy seiko dpu414 ])
+AC_MSG_RESULT([              hp500c hpdj hpljii hppj starc])
+AC_MSG_RESULT([    other:    block pbm ])
 AC_MSG_RESULT([])
 
 if test "$with_tektronix" = no; then
-  AC_MSG_RESULT([  tektronix terminal emulators: no ( --with-tektronix to enable)])
+  AC_MSG_RESULT([  Tektronix terminal emulators: no ( --with-tektronix to enable)])
 else
-  AC_MSG_RESULT([  tektronix terminal emulators: yes ( --without-tektronix to disable)])
+  AC_MSG_RESULT([  Tektronix terminal emulators: yes ( --without-tektronix to disable)])
 fi
-AC_MSG_RESULT([    tek410x tek40 vttek xterm kc_tek40 km_tek40 selanar sixeltek bitgraph])
-AC_MSG_RESULT([    note: not needed for sixel graphics output to vt100-series emulators])
+AC_MSG_RESULT([    tek410x tek40 vttek xterm kc_tek40 km_tek40 selanar bitgraph])
+AC_MSG_RESULT([    sixeltek (not needed for sixel graphics output to vt100-series emulators)])
 
 AC_MSG_RESULT([])
 AC_MSG_RESULT([  Platform-specific, legacy, or specialized terminals omitted by default:])
 
-if test "$GGI_SUPPORT" = yes; then
-  if test "$ac_cv_header_ggi_xmi_h" = yes; then
-    AC_MSG_RESULT([    ggi terminal: yes (with pm3d support)])
-  else
-    AC_MSG_RESULT([    ggi terminal: yes (no pm3d support, requires ggi xmi library)])
-  fi
-else
-  AC_MSG_RESULT([    ggi terminal:  no   (use --with-ggi to enable, requires libggi)])
-fi
-
 if test "$with_gpic" = yes; then
-  AC_MSG_RESULT([    gpic terminal: yes])
+  AC_MSG_RESULT([    gpic      : yes])
 else
-  AC_MSG_RESULT([    gpic terminal: no   (use --with-gpic to enable)])
+  AC_MSG_RESULT([    gpic      :  no   (use --with-gpic to enable)])
 fi
 
 if test "$with_tgif" = yes; then
-  AC_MSG_RESULT([    tgif terminal: yes])
+  AC_MSG_RESULT([    tgif      : yes])
 else
-  AC_MSG_RESULT([    tgif terminal: no   (use --with-tgif to enable)])
+  AC_MSG_RESULT([    tgif      :  no   (use --with-tgif to enable)])
 fi
 
-if test "$with_mif" = yes; then
-  AC_MSG_RESULT([    mif terminal (FrameMaker 3): yes])
+if test "$with_metafont" = yes; then
+  AC_MSG_RESULT([    metafont  : yes])
 else
-  AC_MSG_RESULT([    mif terminal (FrameMaker 3): no   (use --with-mif to enable)])
+  AC_MSG_RESULT([    metafont  :  no   (use --with-metafont to enable)])
+fi
+
+if test "$with_metapost" = yes; then
+  AC_MSG_RESULT([    metapost  : yes])
+else
+  AC_MSG_RESULT([    metapost  :  no   (use --with-metapost to enable)])
 fi
 
 if test "$with_regis" = yes; then
-  AC_MSG_RESULT([    ReGIS terminal: yes])
+  AC_MSG_RESULT([    ReGIS     : yes])
 else
-  AC_MSG_RESULT([    ReGIS terminal: no  (use --with-regis to enable)])
+  AC_MSG_RESULT([    ReGIS     :  no   (use --with-regis to enable)])
 fi
 
 if test "$is_msdos" = yes; then
-  AC_MSG_RESULT([    svga terminal (MSDOS/djgpp): yes])
+  AC_MSG_RESULT([    svga (djgpp): yes])
 fi
 
 if test "$build_src_beos_subdir" = yes; then
-  AC_MSG_RESULT([    be terminal (BeOS): yes])
+  AC_MSG_RESULT([    be (BeOS) : yes])
+
 fi
 
 if test "$with_caca" = yes; then
-  AC_MSG_RESULT([    caca terminal: yes (EXPERIMENTAL)])
+  AC_MSG_RESULT([    caca      : yes   (EXPERIMENTAL)])
 else
-  AC_MSG_RESULT([    caca terminal:  no   (use --with-caca to enable)])
+  AC_MSG_RESULT([    caca      :  no   (use --with-caca to enable)])
 fi
 
 if test "$gnuplot_framework_AquaTerm" = yes; then
-  AC_MSG_RESULT([    aqua terminal (OSX): yes])
+  AC_MSG_RESULT([    aqua      : yes   (macOS only)])
 else
-  AC_MSG_RESULT([    aqua terminal (OSX): no])
+  AC_MSG_RESULT([    aqua      :  no   (macOS only)])
 fi
 
 AC_MSG_RESULT([])
 AC_MSG_RESULT([  Other terminals that can be enabled but have no ./configure option:])
-AC_MSG_RESULT([    eepic, emtex, hp2623a, hp2648, imagen, kyocera, latex, qms, tpic ])
-AC_MSG_RESULT([    pm (makefile.os2), be (BeOS), svga (MSDOS/djgpp), windows])
+AC_MSG_RESULT([    eepic, emtex, hp2623a, hp2648, imagen, kyocera, latex, mif, tpic ])
+AC_MSG_RESULT([    qms, pm (makefile.os2), be (BeOS), svga (MSDOS/djgpp), windows])
 
 dnl These are the most common interactive terminal options
 AC_MSG_RESULT([])
 if test "$no_x" != yes; then
   if test "$enable_x11_mbfonts" = yes; then
-    AC_MSG_RESULT([  X Window System terminal: yes  (multi-byte fonts OK)])
+    AC_MSG_RESULT([  x11 (X Window System): yes  (multi-byte fonts OK)])
   else
-    AC_MSG_RESULT([  X Window System terminal: yes  (multi-byte fonts not supported)])
+    AC_MSG_RESULT([  x11 (X Window System): yes  (multi-byte fonts not supported)])
   fi
 
   if test "$enable_x11_external" = yes; then
-    AC_MSG_RESULT([    (enable plotting to windows opened by external apps) ])
+    AC_MSG_RESULT([                               (enable plotting to windows opened by external apps) ])
   else
-    AC_MSG_RESULT([    (disable plotting to windows opened by external apps) ])
+    AC_MSG_RESULT([                               (disable plotting to windows opened by external apps) ])
   fi
 
   if test "$with_x_dcop" = yes; then
     AC_MSG_RESULT([    (gnuplot_x11 can use KDE3/DCOP to raise konsole) ])
   fi
 else
-  AC_MSG_RESULT([  X Window System terminal: no (requires X libraries)])
+  AC_MSG_RESULT([  x11 (X Window System) :   no (requires X libraries)])
 fi
 
 if test "$ac_cv_lib_gd_gdImageJpeg" = yes && 
    test "$ac_cv_lib_gd_gdImagePng" = yes && 
    test "$ac_cv_lib_gd_gdImageGif" = yes; then
     if test "$ac_cv_lib_gd_gdImageGifAnimBegin" = yes; then
-      AC_MSG_RESULT([  libgd-based png, jpeg, and gif terminals: yes (with animated gif)])
+      AC_MSG_RESULT([  libgd-based png jpeg gif sixel: yes (with animated gif)])
     else
-      AC_MSG_RESULT([  libgd-based png, jpeg, and gif terminals: yes (no animated gif)])
+      AC_MSG_RESULT([  libgd-based png jpeg gif sixel: yes (no animated gif)])
     fi
 else
-    AC_MSG_RESULT([  libgd-based png, jpeg, and gif terminals: no (requires libgd,  see config.log) ])
+    AC_MSG_RESULT([  libgd-based png jpeg gif sixel: no (requires libgd,  see config.log) ])
 fi
 
 if test "$with_cairo" = yes; then
-  AC_MSG_RESULT([  cairo-based pdf and png terminals: yes ])
+  AC_MSG_RESULT([  cairo-based pdf png  : yes ])
 else
   AC_MSG_RESULT([  cairo-based terminals: no (requires cairo>=1.2, pango>=1.22, glib>=2.28)])
 fi
 
-if test "$with_lua" = yes; then
-  AC_MSG_RESULT([  lua/TikZ terminal: yes ])
+if test "$with_webp" = yes; then
+  AC_MSG_RESULT([  webp                 : yes ])
 else
-  AC_MSG_RESULT([  lua/TikZ terminal: no ])
+  AC_MSG_RESULT([  webp                 : no (requires cairo, pango, libwebp, libwebpmux)])
+fi
+
+if test "$with_lua" = yes; then
+  AC_MSG_RESULT([  lua/TikZ             : yes ])
+else
+  AC_MSG_RESULT([  lua/TikZ             : no ])
 fi
 
 if test "$enable_wxwidgets_ok" = yes; then
   if test "$with_wx_multithreaded" = yes; then
-    AC_MSG_RESULT([  wxt terminal: yes (multithreaded)])
+    AC_MSG_RESULT([  wxt                  : yes (multithreaded)])
   else
-    AC_MSG_RESULT([  wxt terminal: yes ])
+    AC_MSG_RESULT([  wxt                  : yes ])
   fi
 else
-  AC_MSG_RESULT([  wxt terminal: no (requires C++, wxWidgets>2.6, cairo>0.9, pango>1.22)])
+  AC_MSG_RESULT([  wxt                  : no (requires C++, wxWidgets>2.6, cairo>0.9, pango>1.22)])
 fi
 
 if test "$enable_qt_ok" = yes; then
   if test "$QTVER" = 4; then
-      AC_MSG_RESULT([  Qt terminal: yes (qt4)])
+      AC_MSG_RESULT([  Qt                   : yes (qt4)])
   fi
   if test "$QTVER" = 5; then
-      AC_MSG_RESULT([  Qt terminal: yes (qt5)])
+      AC_MSG_RESULT([  Qt                   : yes (qt5)])
+  fi
+  if test "$QTVER" = 6; then
+      AC_MSG_RESULT([  Qt                   : yes (qt6)])
   fi
 else
-  AC_MSG_RESULT([  Qt terminal: no (use --with-qt or --with-qt=qt4 to enable])
+  AC_MSG_RESULT([  Qt                   : no (use --with-qt or --with-qt=qt4 or --with-qt=qt5 to enable])
 fi
 
 AC_MSG_RESULT([])
 AC_MSG_RESULT([gnuplot will be compiled with the following configurable features:])
 AC_MSG_RESULT([])
-
-if test "$enable_mouse" = yes; then
-  AC_MSG_RESULT([  Mouse support in interactive terminals: yes])
-else
-  AC_MSG_RESULT([  Mouse support in interactive terminals: no])
-fi
-
-if test "$enable_raise_console" = yes; then
-  AC_MSG_RESULT([  Typing <space> in plot window raises console: yes])
-else
-  AC_MSG_RESULT([  Typing <space> in plot window raises console: no])
-fi
 
 if test "$with_readline" = no; then
   AC_MSG_RESULT([  No readline support (use --with-readline=gnu or --with-readline=builtin)])
@@ -1329,21 +1418,29 @@ fi
 fi
 
 if test "$enable_history_file" = yes; then
-  AC_MSG_RESULT([  Command-line history file: yes])
+  AC_MSG_RESULT([  Command-line history file:                       yes])
 else
-  AC_MSG_RESULT([  Command-line history file: no])
+  AC_MSG_RESULT([  Command-line history file:                       no])
 fi
 
-if test "$with_cwdrc" = yes; then
-  AC_MSG_RESULT([  Check current directory for .gnuplot file: yes (warning: security risk)])
+if test "${enable_stable_sort}" = yes; then
+  AC_MSG_RESULT([  Add code to ensure pm3d depth sorting is stable: yes])
+elif test "${have_stable_sort}" = yes; then
+  AC_MSG_RESULT([  Add code to ensure pm3d depth sorting is stable: no (not needed)])
 else
-  AC_MSG_RESULT([  Check current directory for .gnuplot file: no (use --with-cwdrc to enable)])
+  AC_MSG_RESULT([  Add code to ensure pm3d depth sorting is stable: no])
 fi
 
-if test "$with_row_help" = no; then
-  AC_MSG_RESULT([  Sort help/subtopic tables by column: yes])
+if test "$enable_mouse" = yes; then
+  AC_MSG_RESULT([  Mouse support in interactive terminals:          yes])
 else
-  AC_MSG_RESULT([  Sort help/subtopic tables by column: no (use --without-row-help to enable)])
+  AC_MSG_RESULT([  Mouse support in interactive terminals:          no])
+fi
+
+if test "$enable_raise_console" = yes; then
+  AC_MSG_RESULT([  Typing <space> in plot window raises console:    yes])
+else
+  AC_MSG_RESULT([  Typing <space> in plot window raises console:    no])
 fi
 
 if test "$have_libcerf" = yes; then
@@ -1352,24 +1449,58 @@ else
   AC_MSG_RESULT([  cerf() and other special functions: no (libcerf not found)])
 fi
 
-if test "$have_external_functions" = yes; then
-  AC_MSG_RESULT([  plugin support for loading external functions: yes ])
+if test "$have_amoslibrary" = yes; then
+  AC_MSG_RESULT([  Complex Airy and Bessel functions:               yes])
 else
-  AC_MSG_RESULT([  plugin support for loading external functions: no ])
+  AC_MSG_RESULT([  Complex Airy and Bessel functions:               no (requires libopenspec or libamos])
+fi
+if test "$have_cexint" = yes; then
+  AC_MSG_RESULT([  Complex exponential integral cexint (libamos):   yes])
+else
+  AC_MSG_RESULT([  Complex exponential integral cexint (libamos):   no])
 fi
 
-dnl if test "$enable_backwards_compatibility" = yes; then
-dnl   AC_MSG_RESULT([  Allow deprecated syntax: yes])
-dnl else
-dnl   AC_MSG_RESULT([  Allow deprecated syntax: no (use --enable-backwards-compatibility)])
-dnl fi
+if test "$have_external_functions" = yes; then
+  AC_MSG_RESULT([  plugin support for loading external functions:   yes ])
+else
+  AC_MSG_RESULT([  plugin support for loading external functions:   no ])
+fi
+
+if test "$enable_backward_compatibility" = yes; then
+  AC_MSG_RESULT([  Allow deprecated syntax:                         yes])
+else
+  AC_MSG_RESULT([  Allow deprecated syntax:                         no ])
+fi
 
 if test "$enable_stats" != no; then
-  AC_MSG_RESULT([  Statistical summary of data ("stats" command): yes])
+  AC_MSG_RESULT([  Statistical summary of data ("stats" command):   yes])
 else
-  AC_MSG_RESULT([  Statistical summary of data ("stats" command): no (use --enable-stats to enable)])
+  AC_MSG_RESULT([  Statistical summary of data ("stats" command):   no (--enable-stats to enable)])
 fi
 
+if test "$enable_watchpoints" != no; then
+  AC_MSG_RESULT([  Support watchpoints during 2D plotting:          yes])
+else
+  AC_MSG_RESULT([  Support watchpoints during 2D plotting:          no (--enable-watchpoints to enable)])
+fi
+
+if test "$enable_polar_grid" != no; then
+  AC_MSG_RESULT([  Support for polar gridded surfaces:              yes])
+else
+  AC_MSG_RESULT([  Support for polar gridded surfaces:              no (--enable-polar-grid to enable)])
+fi
+
+if test "$enable_function_blocks" != no; then
+  AC_MSG_RESULT([  Support function blocks:                         yes])
+else
+  AC_MSG_RESULT([  Support function blocks:                         no (--enable-function-blocks to enable)])
+fi
+
+if test "$enable_chi_shapes" != no; then
+  AC_MSG_RESULT([  Support concave hulls:                           yes])
+else
+  AC_MSG_RESULT([  Support concave hulls:                           no (--enable-chi-shapes to enable)])
+fi
 
 AC_MSG_RESULT([])
 AC_MSG_RESULT([gnuplot will install the following additional materials:])

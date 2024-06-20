@@ -52,7 +52,8 @@ enum DF_STATUS {
     DF_FOUND_KEY_TITLE = -6,
     DF_KEY_TITLE_MISSING = -7,
     DF_STRINGDATA = -8,
-    DF_COLUMN_HEADERS = -9
+    DF_COLUMN_HEADERS = -9,
+    DF_COMPLEX_VALUE = -10
 };
 
 /* large file support (offsets potentially > 2GB) */
@@ -89,6 +90,12 @@ extern TBOOLEAN df_matrix;
 
 /* is this a binary file? */
 extern TBOOLEAN df_binary;
+
+/* will this need to be expanded into a fully populated grid? */
+extern TBOOLEAN df_sparse_matrix;
+
+/* was df_open called on something that turned out to be a voxel grid? */
+extern TBOOLEAN df_voxelgrid;
 
 extern char *df_filename;
 extern int df_line_number;
@@ -147,7 +154,8 @@ int df_3dmatrix(struct surface_points *, int);
 void df_set_key_title(struct curve_points *);
 void df_set_key_title_columnhead(struct curve_points *);
 char * df_parse_string_field(char *);
-int expect_string(const char column );
+int expect_string(const signed char column);
+void require_value(const char column);
 
 char *df_retrieve_columnhead(int column);
 void df_reset_after_error(void);
@@ -280,7 +288,7 @@ typedef struct df_binary_file_record_struct {
 
 extern df_binary_file_record_struct *df_bin_record;
 extern int df_num_bin_records;
-extern struct coordinate blank_data_line;
+extern const struct coordinate blank_data_line;
 
 extern struct use_spec_s use_spec[];
 
@@ -300,5 +308,7 @@ df_data_type df_get_read_type(int col);                     /* Type of data in t
 int df_get_read_size(int col);                              /* Size of data in the binary column. */
 int df_get_num_matrix_cols(void);
 void df_set_plot_mode(int);
+
+void populate_sparse_matrix(struct coordinate **points, int *p_count);
 
 #endif /* GNUPLOT_DATAFILE_H */

@@ -1,0 +1,22 @@
+Description: Use xelatex instead of pdflatex
+Author: Anton Gladky <gladk@debian.org>
+Last-Update: 2024-02-25
+
+--- gnuplot-6.0.0+dfsg1.orig/docs/Makefile.am
++++ gnuplot-6.0.0+dfsg1/docs/Makefile.am
+@@ -184,11 +184,11 @@ pdf_nofig: no_figures gnuplot.pdf figure
+ 
+ gnuplot.pdf: gnuplot.tex $(srcdir)/titlepag.tex $(srcdir)/toc_entr.sty pdf_figures
+ 	$(AM_V_GEN)if test $(PDFLATEX) != no ; then \
+-	  TEXINPUTS=.:$(srcdir):$(top_srcdir):${TEXINPUTS}: $(PDFLATEX) $< ; \
+-	  TEXINPUTS=.:$(srcdir):$(top_srcdir):${TEXINPUTS}: $(PDFLATEX) $< ; \
+-	  TEXINPUTS=.:$(srcdir):$(top_srcdir):${TEXINPUTS}: $(PDFLATEX) $< ; \
++	  TEXINPUTS=.:$(srcdir):$(top_srcdir):${TEXINPUTS}: xelatex $< ; \
++	  TEXINPUTS=.:$(srcdir):$(top_srcdir):${TEXINPUTS}: xelatex $< ; \
++	  TEXINPUTS=.:$(srcdir):$(top_srcdir):${TEXINPUTS}: xelatex $< ; \
+ 	  makeindex gnuplot ; \
+-	  TEXINPUTS=.:$(srcdir):$(top_srcdir):${TEXINPUTS}: $(PDFLATEX) $< ; \
++	  TEXINPUTS=.:$(srcdir):$(top_srcdir):${TEXINPUTS}: xelatex $< ; \
+ 	  rm -f gnuplot.idx gnuplot.ilg gnuplot.ind ; \
+ 	else \
+ 	  echo pdflatex not found - cannot build pdf file ; \

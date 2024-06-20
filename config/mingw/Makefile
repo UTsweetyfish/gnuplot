@@ -42,7 +42,7 @@ VARIANT = PLAIN
 # Comment out the definition lines to disable the according features:
 
 # Define this only if doing a release build
-RELEASE=1
+#RELEASE=1
 
 # Set-up your compiler environment
 #
@@ -116,11 +116,15 @@ MOUSE=1
 #CAIROTERMS=1
 #CAIROLIBS=1
 
-# WXWIDGETS interactive terminal
+# wxt interactive terminal
 # Requires wxWidgets, Cairo, Pango, and their respective dependencies.
 # Uncomment the following lines to compile it.
 #WXT=1
 #CAIROLIBS=1
+
+# Include webp terminal 
+# Requires webp lib and cairo libraries.
+#WEBP=1
 
 # Build qt terminal?
 #QT=1
@@ -149,12 +153,28 @@ endif
 ICONV=1
 
 # Uncomment if you have libcerf
-# http://sourceforge.net/projects/libcerf/
+# https://jugit.fz-juelich.de/mlz/libcerf
 CERF=1
+
+# Uncomment if you have libopenspecfun
+# https://github.com/JuliaMath/openspecfun
+OPENSPECFUN=1
 
 # Uncomment if console mode gnuplot should use GNU readline
 # (not recommended)
 #GNUREADLINE=1
+
+# Uncomment if you want to use watchpoints
+#WATCHPOINTS=1
+
+# Uncomment if you want to use polar grid
+#POLAR_GRID=1
+
+# Uncomment if you want to use functionblocks
+#FUNCTIONBLOCKS=1
+
+# Uncomment if you want a stable sort for pm3d and hidden3d surfaces
+#STABLE_SORT=1
 
 # Uncomment if you want to use Direct2D 1.1 (Windows 8 and Windows 7 Platform Update)
 DIRECT2D11=1
@@ -226,7 +246,8 @@ GNUSORT = /bin/sort
 
 # Inno Setup Compiler
 # get it from: http://www.jrsoftware.org/isdl.php
-# Use the Unicode version of Inno Setup Compiler
+# Use unicode version of Inno Setup Compiler but not Standard version
+# because the setup file of gnuplot installer is now encoded utf-8 with BOM.
 ISCC = $(PROGRAMFILES32)/Inno\ Setup\ 6/iscc
 
 #DLLS = 1
@@ -255,6 +276,8 @@ endif
 # We enforce to use console mode gnuplot to run gnuplot scripts in order
 # to see their output during make.
 TARGET=gnuplot.exe
+
+BUILT_SOURCES = allterm.h allterm-ja.h
 
 ifdef MINGW64
 ifdef M32
@@ -321,13 +344,15 @@ VPATH = $(S):$(S)/wxterminal
 
 CFLAGS += -DGNUPLOT_PS_DIR=\"$(GNUPLOT_PS_DIR)\" 
 TERMFLAGS = -DGNUPLOT_JS_DIR=\"$(GNUPLOT_JS_DIR)\"
-TERMFLAGS += -I$(TOP)/term
 
 TERMLIBS =
 
 CFLAGS += -I. -I$(S) -I$(T) -DHAVE_CONFIG_H
 CFLAGS += -D__USE_MINGW_ANSI_STDIO=1
+CFLAGS += -DWITH_CHI_SHAPES=1
 CFLAGS += -DGNUPLOT_SHARE_DIR=\"$(GNUPLOT_SHARE_DIR)\"
+
+CFLAGS_DOCS = -I. -I$(S) -DHAVE_CONFIG_H
 
 ifndef RELEASE
   CFLAGS += -DDEVELOPMENT_VERSION
@@ -433,6 +458,10 @@ endif
 ifdef CAIROTERMS
 	CFLAGS += -DHAVE_CAIROPDF
 	TERMFLAGS += -DHAVE_CAIROEPS
+ifdef WEBP
+	CFLAGS += -DHAVE_WEBP
+	TERMLIBS += -lwebp -lwebpmux
+endif
 endif
 
 ifdef WXT
@@ -512,6 +541,11 @@ ifdef CERF
 	TERMLIBS += -lcerf -lm
 endif
 
+ifdef OPENSPECFUN
+	CFLAGS += -DHAVE_AMOS
+	TERMLIBS += -lopenspecfun_dll
+endif
+
 ifdef GNUREADLINE
 #	readline only usable for console mode gnuplot
 	EXTRA_CPPFLAGS_PLAIN = -DREADLINE
@@ -520,6 +554,22 @@ ifdef GNUREADLINE
 	TERMLIBS_CONSOLE += -lreadline -lncurses
 else
 	CFLAGS += -DREADLINE
+endif
+
+ifdef WATCHPOINTS
+	CFLAGS += -DUSE_WATCHPOINTS
+endif
+
+ifdef POLAR_GRID
+	CFLAGS += -DUSE_POLAR_GRID
+endif
+
+ifdef FUNCTIONBLOCKS
+	CFLAGS += -DUSE_FUNCTIONBLOCKS
+endif
+
+ifdef STABLE_SORT
+	CFLAGS += -DWITH_STABLE_SORT
 endif
 
 ifdef DIRECT2D11
@@ -550,8 +600,8 @@ VERSIONING = timestamp.h
 endif
 
 PATCHLEVEL := $(shell cat $(TOP)/PATCHLEVEL)
-MAINVERSION := 5.4
-SHORTVERSION := 54$(PATCHLEVEL)
+MAINVERSION := 6.0
+SHORTVERSION := 60$(PATCHLEVEL)
 NUMBERS := 0 1 2 3 4 5 6 7 8 9
 ifeq ($(strip $(filter-out $(NUMBERS),$(PATCHLEVEL))),)
 LONGVERSION := $(MAINVERSION).$(PATCHLEVEL)
@@ -585,9 +635,7 @@ pipes: $(TARGETS_PIPES)
 
 console: $(TARGETS_CONSOLE)
 
-docs: gnuplot.pdf ps_symbols.pdf ps_fontfile_doc.pdf ps_guide.pdf faq.pdf
-
-faq: faq.pdf
+docs: $(BUILT_SOURCES) gnuplot.pdf ps_symbols.pdf ps_fontfile_doc.pdf ps_guide.pdf
 
 helpfile: $(HELPFILE)
 
@@ -674,7 +722,7 @@ wgnuplot_pipes.exe: $(VERSIONING) $(OBJS_PIPES) wgplt_res.o $(EXTRALIBS)
 	$(TERMLIBS) $(TERMLIBS_PIPES) $(WX_LIBS) $(PANGOCAIRO_LIBS)
 
 gnuplot.exe: $(VERSIONING) $(OBJS_CONSOLE) wgplt_res.o $(EXTRALIBS)
-	$(LDX) $(LDFLAGS) -mconsole $(LDFLAGS2) -o $@ $(OBJS_CONSOLE) wgplt_res.o $(LDLIBS) \
+	$(LDX) $(LDFLAGS) -mconsole $(LDFLAGS2) -o $@ $(OBJS_CONSOLE) wgplt_res.o  $(LDLIBS) \
 	$(TERMLIBS) $(TERMLIBS_CONSOLE) $(WX_LIBS) $(PANGOCAIRO_LIBS)
 
 wgnuplot.mnu: $(W)/wgnuplot.mnu
@@ -693,6 +741,7 @@ term.po: term.c term.h plot.h setshow.h bitmap.h $(CORETERM)
 	$(CC) -c $(CFLAGS) $(EXTRA_CPPFLAGS_PIPES) $(TERMFLAGS) -MMD -MT '$*.po' -MF $*.pd -o $@ $<
 term.co: term.c term.h plot.h setshow.h bitmap.h $(CORETERM)
 	$(CC) -c $(CFLAGS) $(EXTRA_CPPFLAGS_CONSOLE) $(TERMFLAGS) -MMD -MT '$*.co' -MF $*.cd -o $@ $<
+
 
 ifndef RELEASE
 git_current := $(shell cut -c6- $(TOP)/.git/HEAD)
@@ -781,7 +830,7 @@ demo_plugin.dll: $(M)plugin/demo_plugin.c
 $(BUILDHELPFILE): doc2html.exe $(D)gnuplot.doc $(D)windows/wgnuplot.hhp $(D)windows/wgnuplot.hhk \
                   $(D)windows/wgnuplot.stp $(D)plotstyles.gnu $(CORETERM) $(TARGET)
 	./doc2html $(D)gnuplot.doc $(D)windows/
-	-GNUPLOT_LIB=../demo ./$(TARGET) -d -e "winhelp=1; cd '$(D)'" plotstyles.gnu
+	-./$(TARGET) -d -e "winhelp=1; cd '$(D)'" plotstyles.gnu
 	-$(HHC) $(D)windows/wgnuplot.hhp
 
 $(HELPFILE): $(BUILDHELPFILE)
@@ -839,20 +888,20 @@ wgnuplot-ja.chm: $(JASRC) doc2html-ja.exe \
 	sed -i -e "s/charset=utf-8/charset=shift-jis/" $(JADW)wgnuplot.hhc
 	sed -i -e "s/Language=0x409 Englisch (USA)/Language=0x411 Japanisch (Japan)/" $(JADW)/wgnuplot.hhp
 	# Build help file
-	-GNUPLOT_LIB=../demo ./$(TARGET) -d -e "winhelp=1; cd '$(JAD)'" plotstyles.gnu
+	-./$(TARGET) -d -e "winhelp=1; cd '$(JAD)'" plotstyles.gnu
 	-$(HHC) $(JADW)wgnuplot.hhp
 	cp $(JADW)wgnuplot.chm $(HELPFILEJA)
 
 doc2html.exe: $(CORETERM) $(D)windows/doc2html.c $(D)termdoc.c $(D)xref.c version.o $(LUA_HELP)
 	$(LD) $(LDFLAGS) -o $@ -DWINDOWS_NO_GUI \
 	    -DVERSION_MAJOR='"$(MAINVERSION)"' -DPATCHLEVEL='"$(PATCHLEVEL)"' \
-	    $(CFLAGS) -I. -I$(D:/=) -I$(T:/=) \
+	    $(CFLAGS_DOCS) -I. -I$(D:/=) -I$(T:/=) \
 	    $(D)windows/doc2html.c $(D)termdoc.c $(D)xref.c
 
 doc2html-ja.exe: $(JASRC) $(D)windows/doc2html.c $(D)termdoc.c $(D)xref.c version.o $(LUA_HELP)
 	$(LD) $(LDFLAGS) -o $@ -DWINDOWS_NO_GUI \
 	    -DVERSION_MAJOR='"$(MAINVERSION)"' -DPATCHLEVEL='"$(PATCHLEVEL)"' \
-	    -DJAPANESE_DOC -I. -I$(JAD) -I$(JA)term $(CFLAGS) \
+	    -DJAPANESE_DOC $(CFLAGS_DOCS) -I. -I$(JAD) -I$(JA)/term \
 	    $(D)windows/doc2html.c $(D)termdoc.c $(D)xref.c
 
 doc2ms.exe: $(D)doc2ms.c $(D)termdoc.c $(D)xref.c version.o $(LUA_HELP)
@@ -904,7 +953,7 @@ allterm.h: $(CORETERM) $(LUA_HELP)
 	  sed '/^ *$$/d;/^#/d' > allterm.h
 	@rm -f allterm.c
 endif
-doc2tex.exe: $(D)doc2tex.c $(D)termdoc.c allterm.h $(CORETERM) $(LUA_HELP)
+doc2tex.exe: $(D)doc2tex.c $(D)termdoc.c allterm.h allterm-ja.h $(CORETERM) $(LUA_HELP)
 	$(LD) $(LDFLAGS) -o $@ -DWINDOWS_NO_GUI -DALL_TERM_DOC $(CFLAGS) \
 	  -I. -I$(D) -I$(T) $(D)doc2tex.c $(D)termdoc.c
 else
@@ -913,12 +962,35 @@ doc2tex.exe: $(D)doc2tex.c $(D)termdoc.c $(LUA_HELP)
 	$(LD) $(LDFLAGS) -o $@ -DWINDOWS_NO_GUI $(CFLAGS) -I. -I$(D) -I$(T) $^
 endif
 
+allterm-ja.h: $(JASRC) $(LUA_HELP)
+	@echo "Building Japanese allterm-ja.h"
+	@for e in `egrep "^[ 	]*START_HELP" $(subst $(T),$(JA)term/,$(CORETERM)) |\
+	     $(GNUSORT) -f -t':' -k2` ; do \
+	  f=`echo $$e |cut -d\: -f1` ; s=`echo $$e | cut -d\: -f2` ;\
+	  sed -n "/^[ 	]*$$s/,/^[ 	]*END_HELP/p" $$f ; \
+	done >allterm-jp.h
+	iconv -f EUC-JP -t UTF-8 allterm-jp.h > allterm-ja.h
+	rm allterm-jp.h
+
+doc2tex-ja.exe: allterm-ja.h allterm.h $(D)doc2tex.c $(D)termdoc.c
+	$(LD) $(LDFLAGS) -o $@ -DWINDOWS_NO_GUI \
+	    -DALL_TERM_DOC \
+	    -DVERSION_MAJOR='"$(MAINVERSION)"' -DPATCHLEVEL='"$(PATCHLEVEL)"' \
+	    -DJAPANESE_DOC $(CFLAGS_DOCS) -I. -I$(JAD) -I$(JA)/term \
+	    $(D)doc2tex.c $(D)termdoc.c
+
 gnuplot.tex: $(D)gnuplot.doc doc2tex.exe
 	./doc2tex $(D)gnuplot.doc gnuplot.tex
 
 gnuplot-figures.tex: $(D)gnuplot.doc doc2tex.exe $(TARGET)
 	GNUPLOT_LIB=$(M) ./$(TARGET) -d $(D)plotstyles.gnu
 	./doc2tex -figures $(D)gnuplot.doc gnuplot-figures.tex
+
+gnuplot-figures-ja.tex: $(D)gnuplot.doc doc2tex-ja.exe $(TARGET)
+	GNUPLOT_LIB=$(M) ./$(TARGET) -d $(D)plotstyles.gnu
+	iconv -f EUC-JP -t UTF-8 $(D)gnuplot-ja.doc > ja.doc
+	./doc2tex-ja -figures ja.doc | sed 's/titlepag.tex/title-ja.tex/' > gnuplot-figures-ja.tex
+	rm ja.doc
 
 gnuplot.dvi: gnuplot.tex $(D)toc_entr.sty $(D)titlepag.tex
 	cp gnuplot.tex gp_tex2.tex
@@ -932,10 +1004,8 @@ gnuplot.dvi: gnuplot.tex $(D)toc_entr.sty $(D)titlepag.tex
 gnuplot.ps: gnuplot.dvi
 	dvips -o gnuplot.ps gnuplot.dvi
 
-gnuplot.pdf: gnuplot-figures.tex $(D)toc_entr.sty $(D)titlepag.tex
+gnuplot.pdf: gnuplot-figures.tex gpinsetfigure.tex $(D)toc_entr.sty $(D)titlepag.tex
 	cp gnuplot-figures.tex gp_tex2.tex
-	echo "\usepackage{graphicx}" > pdffigures.tex
-	echo "\usepackage{picins}" >> pdffigures.tex
 	# Call LaTeX three times to get the toc right.
 	TEXINPUTS=.:$(TOP):$(D):${TEXINPUTS}: pdflatex gp_tex2.tex
 	TEXINPUTS=.:$(TOP):$(D):${TEXINPUTS}: pdflatex gp_tex2.tex
@@ -945,6 +1015,27 @@ gnuplot.pdf: gnuplot-figures.tex $(D)toc_entr.sty $(D)titlepag.tex
 	TEXINPUTS=.:$(TOP):$(D):${TEXINPUTS}: pdflatex gp_tex2.tex
 	mv gp_tex2.pdf gnuplot.pdf
 	rm -f gp_tex2.*
+
+# Prepare PDF copy of User Manual in Japanese
+# This procedure assumes use of luatex with package luatexja
+gnuplot-ja.pdf: gnuplot-figures-ja.tex gpinsetfigure.tex $(D)toc_entr.sty $(D)title-ja.tex
+	cp gnuplot-figures-ja.tex gp_tex2.tex
+	# Call LaTeX three times to get the toc right.
+	TEXINPUTS=.:$(TOP):$(D):${TEXINPUTS}: lualatex gp_tex2.tex
+	TEXINPUTS=.:$(TOP):$(D):${TEXINPUTS}: lualatex gp_tex2.tex
+	TEXINPUTS=.:$(TOP):$(D):${TEXINPUTS}: lualatex gp_tex2.tex
+	# now include index
+	makeindex gp_tex2
+	TEXINPUTS=.:$(TOP):$(D):${TEXINPUTS}: lualatex gp_tex2.tex
+	mv gp_tex2.pdf gnuplot-ja.pdf
+	rm -f gp_tex2.*
+
+gpinsetfigure.tex: Makefile
+	echo "\usepackage{graphicx}" > gpinsetfigure.tex
+	echo "\usepackage{picins}" >> gpinsetfigure.tex
+	echo "\newcommand{\gpinsetfigure}[1]{" >> gpinsetfigure.tex ; \
+	echo "  \parpic[r][rt]{\includegraphics[width=3in,keepaspectratio]{#1}}" >> gpinsetfigure.tex ; \
+	echo "}" >> gpinsetfigure.tex
 
 gnuplot.ms: doc2ms.exe $(D)gnuplot.doc
 	./doc2ms $(D)gnuplot.doc gnuplot.ms
@@ -957,27 +1048,6 @@ grops: $(D)titlepag.ms gnuplot.ms
 gropdf: $(D)titlepag.ms gnuplot.ms
 	sed "s,titlepag\.ms,$(D)titlepag\.ms," gnuplot.ms | \
 	groff -s -p -t -e -ms -k -K utf-8 -Tpdf > gnuplot.pdf
-
-TUT = $(TOP)/tutorial
-tutorial.pdf: $(TUT)/eg1.plt $(TUT)/eg2.plt $(TUT)/eg3.plt $(TUT)/eg4.plt \
-	$(TUT)/eg5.plt $(TUT)/eg6.plt $(TUT)/eg7.plt $(TUT)/linepoin.plt \
-	$(TUT)/test.plt $(TUT)/test_tikz.plt $(TUT)/tutorial.tex
-	GNUPLOT_LIB=$(TUT) ./$(TARGET) eg1.plt
-	GNUPLOT_LIB=$(TUT) ./$(TARGET) eg2.plt
-	GNUPLOT_LIB=$(TUT) ./$(TARGET) eg3.plt
-	GNUPLOT_LIB=$(TUT) ./$(TARGET) eg4.plt
-	GNUPLOT_LIB=$(TUT) ./$(TARGET) eg5.plt
-	GNUPLOT_LIB=$(TUT) ./$(TARGET) eg6.plt
-	GNUPLOT_LIB=$(TUT) GNUPLOT_PS_DIR=$(T)PostScript ./$(TARGET) eg7.plt
-	GNUPLOT_LIB=$(TUT) ./$(TARGET) linepoin.plt
-	GNUPLOT_LIB=$(TUT) ./$(TARGET) test.plt
-#ifdef LUA
-	GNUPLOT_LIB=$(TUT) GNUPLOT_LUA_DIR=$(T)lua ./$(TARGET) test_tikz.plt
-#endif
-	# run latex twice to get references right
-	TEXINPUTS=.:$(TUT) latex tutorial.tex
-	TEXINPUTS=.:$(TUT) latex tutorial.tex
-	dvipdfm tutorial.dvi
 
 ps_symbols.pdf: $(D)psdoc/ps_symbols.gpi
 	GNUPLOT_LIB=$(D)psdoc GNUPLOT_PS_DIR=$(T)PostScript ./$(TARGET) -d ps_symbols.gpi
@@ -995,46 +1065,50 @@ ps_fontfile_doc.pdf: $(D)psdoc/ps_fontfile_doc.tex
 ps_guide.pdf: $(D)psdoc/ps_guide.ps
 	ps2pdf $(D)psdoc/ps_guide.ps ps_guide.pdf
 
-ifdef RELEASE
-faq.pdf: $(TOP)/FAQ.pdf
-	cp $< .
-else
-faq.pdf: $(TOP)/faq/faq.tex
-	pdflatex $<
-	pdflatex $<
-	pdflatex $<
-endif
+latex_demo.pdf: gnuplot.exe $(M)/latex_demo.dem $(M)/latex_demo.tex
+	GNUTERM="dumb noenhanced" GNUPLOT_LIB=$(M) GNUPLOT_PS_DIR=$(T)/PostScript ./gnuplot latex_demo.dem
+	latex epslatex.tex
+	dvips -E epslatex -o latex_epslatex.eps
+	epstopdf latex_epslatex.eps
+	xelatex $(M)/latex_demo
 
 # clean up temporary files
 clean:
-	$(RM) config.h wgnuplot.map wgnuplot.res
-	$(RM) *.o *.po *.co *.d *.cd *.pd *.map
-	$(RM) moc_*.cpp ui_*.h qrc_*.cpp
+	-$(RM) config.h wgnuplot.map wgnuplot.res
+	-$(RM) *.o *.po *.co *.d *.cd *.pd *.map
+	-$(RM) moc_*.cpp ui_*.h qrc_*.cpp
 	-$(RM) prntvpt.lib prntvpt.def
-	$(RM) doc2*.exe $(W)/wgnuplib.res wgnuplib.map wgnuplot.lib
-	$(RM) $(M)bf_test.exe demo_plugin.dll allterm.h allterm.c
-	$(RM) *.aux *.log *.dvi *.toc
-	$(RM) gnuplot.tex gnuplot-figures.tex pdffigures.tex figure_*.pdf
-	$(RM) titlepag.tex toc_entr.sty
-	$(RM) eg?.tex eg?.eps linepoin.tex test.tex test_tikz.tex
-	$(RM) $(D)windows/wgnuplot.log $(D)windows/wgnuplot.hhc
-	$(RM) $(D)windows/*.png $(D)windows/wgnuplot.html
+	-$(RM) doc2*.exe $(W)/wgnuplib.res wgnuplib.map wgnuplot.lib
+	-$(RM) $(M)bf_test.exe demo_plugin.dll allterm.h allterm.c
+	-$(RM) *.aux *.log *.dvi *.toc
+	-$(RM) gnuplot.tex gnuplot-figures.tex gpinsetfigure.tex figure_*.pdf
+	-$(RM) titlepag.tex toc_entr.sty
+	-$(RM) eg?.tex eg?.eps linepoin.tex test.tex test_tikz.tex
+	-$(RM) $(D)windows/wgnuplot.log $(D)windows/wgnuplot.hhc
+	-$(RM) $(D)windows/*.png $(D)windows/wgnuplot.html
+	-$(RM) doc2html.exe
 	-$(RM) timestamp.h *.tmp *.par
 	-$(RM) -rf ./dist/ ./gnuplot/
 	-$(RM) -rf $(JA)
+	-$(RM) allterm-ja.h gnuplot-figures-ja.tex
+	-$(RM) doc2html-ja.exe doc2tex-ja.exe
+	-$(RM) latex_epslatex.eps latex_epslatex.pdf epslatex.* epslatex-inc.eps
+	-$(RM) latex_cairo.pdf latex_cairo.tex latex_pict2e.tex latex_tikz.tex
+	-$(RM) latex_demo.aux latex_demo.log
 
 realclean: veryclean
 veryclean: clean
 	$(RM) wgnuplot.exe wgnuplot_pipes.exe gnuplot.exe pgnuplot.exe
 	$(RM) gnuplot_qt.exe qtgnuplot_*.qm
-	$(RM) $(HELPFILE) $(HELPFILEJA) wgnuplot.chw wgnuplot.gid wgnuplot.mnu
+	-$(RM) $(HELPFILE) $(HELPFILEJA) wgnuplot.chw wgnuplot.gid wgnuplot.mnu
 	$(RM) gnuplot.ps gnuplot.pdf
-	-$(RM) tutorial.pdf faq.pdf
+	-$(RM) gnuplot-ja.pdf
 	$(RM) ps_fontfile_doc.pdf ps_fontfile_doc.ps ps_guide.pdf
 	$(RM) ps_symbols.ps ps_symbols.pdf
 	$(RM) $(M)binary[123] $(M)fit.log $(M)soundfit.par
 	$(RM) gnuplot-lua-tikz.sty gnuplot-lua-tikz.tex
 	$(RM) gnuplot-lua-tikz-common.tex t-gnuplot-lua-tikz.tex
+	$(RM) latex_demo.pdf
 
 # now move the whole stuff to its destination
 install:
@@ -1105,7 +1179,6 @@ endif
 	mkdir -p $(DESTDIR)/docs
 	-cp -p gnuplot.pdf $(DESTDIR)/docs/
 	cp -p FAQ.pdf $(DESTDIR)/docs/FAQ.pdf
-	#-cp -p tutorial.pdf $(DESTDIR)/docs/
 	mkdir -p $(DESTDIR)/docs/psdoc
 	cp -p $(D)psdoc/ps_file.doc $(DESTDIR)/docs/psdoc/ps_file_doc.txt
 	cp -p $(D)psdoc/ps_guide.ps $(DESTDIR)/docs/psdoc/

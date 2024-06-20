@@ -302,7 +302,7 @@ void QtGnuplotScene::processEvent(QtGnuplotEventType type, QDataStream& in)
 	else if (type == GESetFont)
 	{
 		QString fontName; in >> fontName;
-		int size        ; in >> size;
+		double size        ; in >> size;
 
 		// strip :Bold or :Italic property out of font name
 		if (fontName.contains(":italic", Qt::CaseInsensitive))
@@ -664,7 +664,7 @@ void QtGnuplotScene::processEvent(QtGnuplotEventType type, QDataStream& in)
 	{
 		QFontMetrics metrics(m_font);
 		int par1 = (metrics.ascent() + metrics.descent());
-		int par2 = metrics.horizontalAdvance("0123456789")/10.;
+		int par2 = round(metrics.horizontalAdvance("0123456789")/10.);
 		m_eventHandler->postTermEvent(GE_fontprops, 0, 0, par1, par2, m_widget);
 	}
 	else if (type == GEDone)
@@ -818,7 +818,7 @@ void QtGnuplotScene::mousePressEvent(QGraphicsSceneMouseEvent* event)
 
 	int button = 0;
 	     if (event->button()== Qt::LeftButton)  button = 1;
-	else if (event->button()== Qt::MidButton)   button = 2;
+	else if (event->button()== Qt::MiddleButton)   button = 2;
 	else if (event->button()== Qt::RightButton) button = 3;
 
 	m_eventHandler->postTermEvent(GE_buttonpress, 
@@ -913,7 +913,7 @@ void QtGnuplotScene::mouseReleaseEvent(QGraphicsSceneMouseEvent* event)
 
 	int button = 0;
 	     if (event->button()== Qt::LeftButton)  button = 1;
-	else if (event->button()== Qt::MidButton)   button = 2;
+	else if (event->button()== Qt::MiddleButton)   button = 2;
 	else if (event->button()== Qt::RightButton) button = 3;
 
 	qint64 time = 301;	/* Only used the first time in, when timer not yet running */

@@ -1,8 +1,10 @@
 ## Process this file with automake to produce Makefile.in -*-Makefile-*-
 AUTOMAKE_OPTIONS = foreign
 
-EXTRA_DIST = README Makefile.am.in driver.h impcodes.h \
-fig_defs.h post.h $(CORETERM) PostScript lua js write_png_image.c sixel.c \
+DISTCLEANFILES = Makefile.am Makefile.in
+
+EXTRA_DIST = README Makefile.am.in driver.h impcodes.h hpgeneric.h \
+fig_defs.h post.h $(CORETERM) PostScript lua js write_png_image.c sixel.c kitty.c \
 latex_old.h
 
 postscriptdir = $(pkgdatadir)/$(VERSION_MAJOR)/PostScript
@@ -13,15 +15,15 @@ jsdir = $(pkgdatadir)/$(VERSION_MAJOR)/js
 # List of terminal drivers, and list of postscript installation files
 # must be created prior to running automake
 ##trm-files-begin
-CORETERM = ai.trm aquaterm.trm be.trm caca.trm cairo.trm canvas.trm \
-cgm.trm context.trm corel.trm debug.trm djsvga.trm dumb.trm dxf.trm \
-dxy.trm eepic.trm emf.trm emxvga.trm epson.trm estimate.trm excl.trm \
-fig.trm gd.trm ggi.trm gpic.trm grass.trm hp2648.trm hp26.trm hp500c.trm \
-hpgl.trm hpljii.trm hppj.trm imagen.trm kyo.trm latex.trm linux-vgagl.trm \
-lua.trm metafont.trm metapost.trm mif.trm pbm.trm pc.trm pdf.trm \
-pict2e.trm pm.trm post.trm pslatex.trm pstricks.trm qms.trm qt.trm \
-regis.trm svg.trm t410x.trm tek.trm texdraw.trm tgif.trm tkcanvas.trm \
-tpic.trm vws.trm win.trm wxt.trm x11.trm xlib.trm 
+CORETERM = ai.trm aquaterm.trm be.trm block.trm caca.trm cairo.trm \
+canvas.trm cgm.trm context.trm corel.trm debug.trm djsvga.trm dumb.trm \
+dxf.trm dxy.trm eepic.trm emf.trm epson.trm estimate.trm excl.trm fig.trm \
+gd.trm ggi.trm gpic.trm grass.trm hp2648.trm hp26.trm hp500c.trm hpgl.trm \
+hpljii.trm hppj.trm imagen.trm kyo.trm latex.trm linux-vgagl.trm lua.trm \
+metafont.trm metapost.trm mif.trm pbm.trm pc.trm pdf.trm pict2e.trm \
+pm.trm post.trm pslatex.trm pstricks.trm qms.trm qt.trm regis.trm svg.trm \
+t410x.trm tek.trm texdraw.trm tgif.trm tkcanvas.trm tpic.trm webp.trm \
+win.trm wxt.trm x11.trm xlib.trm 
 #
 postscript_DATA = PostScript/8859-15.ps PostScript/8859-1.ps \
 PostScript/8859-2.ps PostScript/8859-9.ps PostScript/cp1250.ps \
@@ -56,4 +58,3 @@ Makefile.am: Makefile.am.in
 	sed -n '/^##trm-files-end/,$$p' $< >> $@t
 	chmod og-w $@t
 	mv $@t $@
-

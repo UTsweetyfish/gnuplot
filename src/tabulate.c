@@ -62,7 +62,7 @@ char *table_sep = NULL;
 struct at_type *table_filter_at = NULL;
 
 static char *expand_newline(const char *in);
-static TBOOLEAN imploded(curve_points *this_plot);
+static TBOOLEAN blanks_needed(curve_points *this_plot);
 
 static FILE *outfile;
 
@@ -171,8 +171,11 @@ print_table(struct curve_points *current_plot, int plot_num)
 	case VECTOR:
 	    len = strappend(&line, &size, len, " delta_x delta_y");
 	    break;
-	case LINES:
 	case POINTSTYLE:
+	    if (current_plot->plot_filter == FILTER_ZSORT)
+		len = strappend(&line, &size, len, " z");
+	    break;
+	case LINES:
 	case LINESPOINTS:
 	case DOTS:
 	case IMPULSES:
@@ -196,7 +199,7 @@ print_table(struct curve_points *current_plot, int plot_num)
 	    break;
 	}
 
-	if (current_plot->plot_smooth == SMOOTH_BINS)
+	if (current_plot->plot_filter == FILTER_BINS)
 	    len = strappend(&line, &size, len, "  N");
 
 	if (current_plot->varcolor)
@@ -225,7 +228,7 @@ print_table(struct curve_points *current_plot, int plot_num)
 	} else {
 	    int plotstyle = current_plot->plot_style;
 	    int type;
-	    TBOOLEAN replace_undefined_with_blank = imploded(current_plot);
+	    TBOOLEAN replace_undefined_with_blank = blanks_needed(current_plot);
 
 	    if (plotstyle == HISTOGRAMS && current_plot->histogram->type == HT_ERRORBARS)
 		plotstyle = YERRORBARS;
@@ -297,8 +300,13 @@ print_table(struct curve_points *current_plot, int plot_num)
 			OUTPUT_NUMBER((point->xhigh - point->x), current_plot->x_axis);
 			OUTPUT_NUMBER((point->yhigh - point->y), current_plot->y_axis);
 			break;
-		    case LINES:
 		    case POINTSTYLE:
+			if (current_plot->plot_filter == FILTER_ZSORT) {
+			    snprintf(buffer, BUFFERSIZE, "%g ", point->z);
+			    len = strappend(&line, &size, len, buffer);
+			}
+			break;
+		    case LINES:
 		    case LINESPOINTS:
 		    case DOTS:
 		    case IMPULSES:
@@ -311,7 +319,8 @@ print_table(struct curve_points *current_plot, int plot_num)
 			break;
 		} /* switch(plot type) */
 
-		if (current_plot->plot_smooth == SMOOTH_BINS) {
+		/* FIXME: which is in the right place - BINS? or ZSORT? */
+		if (current_plot->plot_filter == FILTER_BINS) {
 		    snprintf(buffer, BUFFERSIZE, " %4d", (int)point->z);
 		    len = strappend(&line, &size, len, buffer);
 		}
@@ -332,7 +341,8 @@ print_table(struct curve_points *current_plot, int plot_num)
 		type = current_plot->points[i].type;
 
 		snprintf(buffer, BUFFERSIZE, " %c",
-			type == INRANGE ? 'i' : type == OUTRANGE ? 'o' : 'u');
+			type == INRANGE ? 'i' : type == OUTRANGE ? 'o' : 
+			type == EXCLUDEDRANGE ? 'e' : 'u');
 		strappend(&line, &size, len, buffer);
 
 		/* cp_implode() inserts dummy undefined point between curves */
@@ -548,8 +558,14 @@ expand_newline(const char *in)
     return tmpstr;
 }
 
+/* Some plot styles depend on an internal convention that a data point
+ * with type UNDEFINED indicates the break between separate curves within
+ * a single plot.  The equivalent convention on input is a blank line.
+ * This routine tests for styles that should convert the UNDEFINED point
+ * to a blank line on output.
+ */
 static TBOOLEAN
-imploded(curve_points *this_plot)
+blanks_needed(curve_points *this_plot)
 {
     switch (this_plot->plot_smooth) {
 	/* These smooth styles called cp_implode() */
@@ -567,6 +583,10 @@ imploded(curve_points *this_plot)
 	case SMOOTH_NONE:
 	case SMOOTH_BEZIER:
 	case SMOOTH_KDENSITY:
+	    break;
+	/* These smooth styles also use the UNDEFINED point convention */
+	case SMOOTH_PATH:
+	    return TRUE;
 	default:
 	    break;
     }
@@ -577,7 +597,7 @@ imploded(curve_points *this_plot)
  * Called from plot2d.c (get_data) for "plot with table"
  */
 TBOOLEAN
-tabulate_one_line(double v[MAXDATACOLS], struct value str[MAXDATACOLS], int ncols)
+tabulate_one_line(double v[], struct value str[], int ncols)
 {
     int col;
     FILE *outfile = (table_outfile) ? table_outfile : gpoutfile;

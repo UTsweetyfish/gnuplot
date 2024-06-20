@@ -1,3 +1,30 @@
+gnuplot (6.0.0+dfsg1-3) unstable; urgency=medium
+
+  * Team upload
+  * Added "nox-only" profile to allow an arch-any build without qt or wxt
+    dependencies. (Closes: #1067582)
+
+ -- Dima Kogan <dkogan@debian.org>  Wed, 03 Apr 2024 13:29:20 -0700
+
+gnuplot (6.0.0+dfsg1-2) unstable; urgency=medium
+
+  [ Zixing Liu ]
+  * [b9f2408] Fix a memory error in doc2tex when generating PDF files
+
+  [ Anton Gladky ]
+  * [6a963da] Remove duplicated dependency
+
+ -- Anton Gladky <gladk@debian.org>  Wed, 13 Mar 2024 21:48:47 +0100
+
+gnuplot (6.0.0+dfsg1-1) unstable; urgency=medium
+
+  * [c4752fd] New upstream version 6.0.0+dfsg1
+  * [dbf032e] Update patches
+  * [593d5f1] Use secure URI in Homepage field.
+  * [dc1938a] Update standards version to 4.6.2, no changes needed.
+
+ -- Anton Gladky <gladk@debian.org>  Tue, 20 Feb 2024 21:13:03 +0100
+
 gnuplot (5.4.4+dfsg1-2) unstable; urgency=medium
 
   * Team upload.

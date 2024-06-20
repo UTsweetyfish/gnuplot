@@ -51,6 +51,10 @@
  *    int df_datum        - increases with each data point
  *    int df_eof          - end of file
  *
+ * public information about the data file or format
+ *    TBOOLEAN df_matrix  - TRUE if splot matrix
+ *    TBOOLEAN df_binary  - binary data file format (maybe auto-generated)
+ *
  * functions
  *   int df_open(char *file_name, int max_using, plot_header *plot)
  *      parses index / using on command line
@@ -104,10 +108,10 @@
 #include "datablock.h"
 
 #include "alloc.h"
-#include "axis.h"
 #include "command.h"
 #include "eval.h"
 #include "gp_time.h"
+#include "gplocale.h"
 #include "graphics.h"
 #include "misc.h"
 #include "parse.h"
@@ -117,7 +121,7 @@
 #include "util.h"
 #include "breaders.h"
 #include "tabulate.h" /* For sanity check inblock != outblock */
-#include "variable.h" /* For locale handling */
+#include "voxelgrid.h"
 
 /* test to see if the end of an inline datafile is reached */
 #define is_EOF(c) ((c) == 'e' || (c) == 'E')
@@ -128,6 +132,10 @@
 /* Used to skip whitespace but not cross a field boundary */
 #define NOTSEP (!df_separators || !strchr(df_separators,*s))
 
+enum COLUMN_TYPE { CT_DEFAULT, CT_STRING, CT_KEYLABEL, CT_MUST_HAVE,
+		CT_XTICLABEL, CT_X2TICLABEL, CT_YTICLABEL, CT_Y2TICLABEL,
+		CT_ZTICLABEL };
+
 /*{{{  static fns */
 static int check_missing(char *s);
 
@@ -135,7 +143,7 @@ static void expand_df_column(int);
 static void clear_df_column_headers(void);
 static char *df_gets(void);
 static int df_tokenise(char *s);
-static float *df_read_matrix(int *rows, int *columns);
+static double *df_read_matrix(int *rows, int *columns);
 
 static void plot_option_every(void);
 static void plot_option_index(void);
@@ -146,14 +154,11 @@ static void add_key_entry(char *temp_string, int df_datum);
 static char * df_generate_pseudodata(void);
 static char * df_generate_ascii_array_entry(void);
 static int df_skip_bytes(off_t nbytes);
+static int axcol_for_ticlabel(enum COLUMN_TYPE type, int *axis);
 
 /*}}} */
 
 /*{{{  variables */
-
-enum COLUMN_TYPE { CT_DEFAULT, CT_STRING, CT_KEYLABEL,
-		CT_XTICLABEL, CT_X2TICLABEL, CT_YTICLABEL, CT_Y2TICLABEL,
-		CT_ZTICLABEL, CT_CBTICLABEL };
 
 /* public (exported) variables client might access */
 
@@ -266,6 +271,8 @@ static char *df_arrayname = NULL;
 static unsigned int df_xpixels;
 static unsigned int df_ypixels;
 static TBOOLEAN df_transpose;
+static double df_image_origin[2];
+static double df_image_deltas[2];
 
 /* parsing stuff */
 struct use_spec_s use_spec[MAXDATACOLS];
@@ -306,6 +313,9 @@ static TBOOLEAN df_already_got_headers = FALSE;
 char *df_key_title = NULL;		/* filled in from column header if requested */
 struct at_type *df_plot_title_at;	/* used for deferred evaluation of plot title */
 
+/* last resort mechanism to catch missing data */
+static TBOOLEAN df_missing_data_in_expression = FALSE;
+
 
 /* Binary *read* variables used by df_readbinary().
  * There is a confusing difference between the ascii and binary "matrix" keywords.
@@ -321,6 +331,8 @@ struct at_type *df_plot_title_at;	/* used for deferred evaluation of plot title 
  * in the same format as "binary matrix", i.e. with explicit x and y coordinates.
  * EAM Jul 2014 - Add keywords "columnheaders" and "rowheaders" to indicate ascii
  * matrix data in the uniform grid format containing labels in row 1 and column 1.
+ * EAM Jul 2021 - Add keyword "sparse matrix" to indicate ascii matrix data
+ * provided as individual entries (x y value) in any order.
  */
 static TBOOLEAN df_read_binary;
 static TBOOLEAN df_nonuniform_matrix;
@@ -340,6 +352,7 @@ static void clear_binary_records(df_records_type);
 static void plot_option_binary_format(char *);
 static void plot_option_binary(TBOOLEAN, TBOOLEAN);
 static void plot_option_array(void);
+static void plot_option_sparse(void);
 static TBOOLEAN rotation_matrix_2D(double R[][2], double);
 static TBOOLEAN rotation_matrix_3D(double P[][3], double *);
 static int token2tuple(double *, int);
@@ -397,6 +410,9 @@ static df_byte_read_order_type byte_read_order(df_endianess_type);
 /* Logical variables indicating information about data file. */
 TBOOLEAN df_binary_file;
 TBOOLEAN df_matrix_file;
+TBOOLEAN df_sparse_matrix;
+TBOOLEAN df_voxelgrid;
+
 
 static int df_M_count;
 static int df_N_count;
@@ -434,7 +450,7 @@ int df_max_num_bin_records = 0, df_num_bin_records, df_bin_record_count;
 int df_max_num_bin_records_default = 0, df_num_bin_records_default;
 
 /* Used to mark the location of a blank line in the original data input file */
-struct coordinate blank_data_line = {UNDEFINED, -999, -999, -999, -999, -999, -999, -999};
+const struct coordinate blank_data_line = {-999, -999, -999, -999, -999, -999, -999, UNDEFINED};
 
 static void gpbin_filetype_function(void);
 static void raw_filetype_function(void);
@@ -745,11 +761,6 @@ df_tokenise(char *s)
 		    )
 		) {
 
-
-		/* This was the [slow] code used through version 4.0
-		 *   count = sscanf(s, "%lf%n", &df_column[df_no_cols].datum, &used);
-		 */
-
 		/* Use strtod() because
 		 *  - it is faster than sscanf()
 		 *  - sscanf(... %n ...) may not be portable
@@ -817,20 +828,21 @@ df_tokenise(char *s)
 	}
 
 	/* skip to 1st character in the next field */
-	if (df_separators != NULL) {
+	if (df_separators != NULL && !df_array) {
 	    /* skip to next separator or end of line */
 	    while ((*s != '\0') && (*s != '\n') && NOTSEP)
 		++s;
 	    if ((*s == '\0') || (*s == '\n'))	/* End of line; we're done */
 		break;
 	    /* step over field separator */
-		++s;
+	    ++s;
 	    /* skip whitespace at start of next field */
 	    while ((*s == ' ' || *s == '\t') && NOTSEP)
 		++s;
 	    if ((*s == '\0') || (*s == '\n'))	{ /* Last field is empty */
 		df_column[df_no_cols].good = DF_MISSING;
 		df_column[df_no_cols].datum = not_a_number();
+		df_column[df_no_cols].position = NULL;
 		++df_no_cols;
 		break;
 	    }
@@ -849,20 +861,19 @@ df_tokenise(char *s)
 }
 
 
-/*{{{  static float *df_read_matrix() */
-/* Reads a matrix from a text file and stores it as floats in allocated
- * memory.
+/*{{{  static double *df_read_matrix() */
+/* Reads a matrix from a text file and stores it in allocated memory.
  *
  * IMPORTANT NOTE:  The routine returns the memory pointer for that matrix,
  * but does not retain the pointer.  Maintenance of the memory is left to
  * the calling code.
  */
-static float *
+static double *
 df_read_matrix(int *rows, int *cols)
 {
     int max_rows = 0;
     int c;
-    float *linearized_matrix = NULL;
+    double *linearized_matrix = NULL;
     char *s;
     int index = 0;
     df_bad_matrix_values = 0;
@@ -973,7 +984,7 @@ df_read_matrix(int *rows, int *cols)
 	if (*rows > max_rows) {
 	    max_rows = GPMAX(2*max_rows,1);
 	    linearized_matrix = gp_realloc(linearized_matrix,
-				   *cols * max_rows * sizeof(float),
+				   *cols * max_rows * sizeof(double),
 				   "df_matrix");
 	}
 
@@ -1008,7 +1019,7 @@ df_read_matrix(int *rows, int *cols)
 		    /* It's going to be skipped anyhow, so... */
 		    linearized_matrix[index++] = 0;
 		} else
-		    linearized_matrix[index++] = (float) df_column[i].datum;
+		    linearized_matrix[index++] = df_column[i].datum;
 
 		if (df_column[i].good != DF_GOOD) {
 		    if (df_nonuniform_matrix && index == 1)
@@ -1114,6 +1125,7 @@ df_open(const char *cmd_filename, int max_using, struct curve_points *plot)
     df_num_bin_records = 0;
     df_matrix = FALSE;
     df_nonuniform_matrix = FALSE;
+    df_sparse_matrix = FALSE;
     df_matrix_columnheaders = FALSE;
     df_matrix_rowheaders = FALSE;
     df_skip_at_front = 0;
@@ -1122,11 +1134,32 @@ df_open(const char *cmd_filename, int max_using, struct curve_points *plot)
     df_ypixels = 0;
     df_transpose = FALSE;
 
+    df_voxelgrid = FALSE;
+
     df_eof = 0;
 
     /* Save for use by df_readline(). */
     /* Perhaps it should be a parameter to df_readline? */
     df_current_plot = plot;
+
+    if (!cmd_filename)
+	int_error(c_token, "missing filename");
+    if (!cmd_filename[0]) {
+	if (!df_filename || !*df_filename)
+	    int_error(c_token-1, "No previous filename");
+	if (!strcmp(df_filename,"@@") && df_arrayname) {
+	    df_array = get_udv_by_name(df_arrayname);
+	    if (df_array->udv_value.type != ARRAY)
+		int_error(c_token-1, "Array %s invalid", df_arrayname);
+	}
+    } else if (cmd_filename[0] == '$' && get_vgrid_by_name(cmd_filename)) {
+	/* The rest of the df_open() processing is not relevant */
+	df_voxelgrid = TRUE;
+	return(1);
+    } else {
+	free(df_filename);
+	df_filename = gp_strdup(cmd_filename);
+    }
 
     /* If either 'set datafile columnhead' or 'set key autotitle columnhead'
      * is in effect we always treat the * first data row as non-data
@@ -1142,25 +1175,13 @@ df_open(const char *cmd_filename, int max_using, struct curve_points *plot)
 	parse_1st_row_as_headers = TRUE;
     else
 	parse_1st_row_as_headers = FALSE;
+    /* arrays or internally generated data ('+' or '++') never have column headers */
+    if (df_array || (df_filename[0] == '+'))
+	parse_1st_row_as_headers = FALSE;
 
-    if (!cmd_filename)
-	int_error(c_token, "missing filename");
-    if (!cmd_filename[0]) {
-	if (!df_filename || !*df_filename)
-	    int_error(c_token-1, "No previous filename");
-	if (!strcmp(df_filename,"@@") && df_arrayname) {
-	    df_array = get_udv_by_name(df_arrayname);
-	    if (df_array->udv_value.type != ARRAY)
-		int_error(c_token-1, "Array %s invalid", df_arrayname);
-	}
-    } else {
-	free(df_filename);
-	df_filename = gp_strdup(cmd_filename);
-    }
-
-    /* defer opening until we have parsed the modifiers... */
-
-    /* pm 25.11.2001 allow any order of options */
+    /*
+     * Defer opening the input file until we have parsed the modifiers
+     */
     while (!END_OF_COMMAND) {
 
 	/* look for binary / matrix */
@@ -1213,13 +1234,30 @@ df_open(const char *cmd_filename, int max_using, struct curve_points *plot)
 	    df_matrix_file = TRUE;
 	    df_nonuniform_matrix = TRUE;
 	    fast_columns = 0;
-	    if (df_matrix_rowheaders || df_matrix_columnheaders)
+	    if (df_sparse_matrix || df_matrix_rowheaders || df_matrix_columnheaders)
 		duplication = TRUE;
 	    continue;
 	}
 
-	/* Jul 2014 - "matrix columnheaders" indicates an ascii data file
-	 * in uniform grid format but with column labels in row 1 */
+	/* Jul 2021 - "sparse matrix" indicates an ascii data file
+	 * with individual [x y value] triples in any order
+	 */
+	if (equals(c_token, "sparse")) {
+	    c_token++;
+	    df_matrix_file = FALSE;
+	    df_sparse_matrix = TRUE;
+	    if (df_nonuniform_matrix || df_matrix_rowheaders || df_matrix_columnheaders)
+		duplication = TRUE;
+	    else
+		plot_option_sparse();
+	    if (plot)
+		plot->image_properties.fallback = TRUE;
+	    continue;
+	}
+
+	/* "matrix columnheaders" indicates an ascii data file
+	 * in uniform grid format but with column labels in row 1
+	 */
 	if (almost_equals(c_token, "columnhead$ers")) {
 	    c_token++;
 	    df_matrix_file = TRUE;
@@ -1229,8 +1267,9 @@ df_open(const char *cmd_filename, int max_using, struct curve_points *plot)
 	    continue;
 	}
 
-	/* Jul 2014 - "matrix rowheaders" indicates an ascii data file
-	 * in uniform grid format but with row labels in column 1 */
+	/* "matrix rowheaders" indicates an ascii data file
+	 * in uniform grid format but with row labels in column 1
+	 */
 	if (almost_equals(c_token, "rowhead$ers")) {
 	    c_token++;
 	    df_matrix_file = TRUE;
@@ -1287,6 +1326,17 @@ df_open(const char *cmd_filename, int max_using, struct curve_points *plot)
 	    c_token++;
 	    if (plot)
 		plot->noautoscale = TRUE;
+	    continue;
+	}
+
+	/* zsort filter will be applied to this data */
+	if (equals(c_token, "zsort")) {
+	    c_token++;
+	    /* FIXME: 2D only! (plot_filter is outside the 2D/3D overlap in headers) */
+	    if (plot && plot->plot_type == DATA3D)
+		continue;
+	    if (plot)
+		plot->plot_filter = FILTER_ZSORT;
 	    continue;
 	}
 
@@ -1380,6 +1430,8 @@ df_open(const char *cmd_filename, int max_using, struct curve_points *plot)
 
     /* Special filenames '-' '+' '++' '$DATABLOCK' */
     if (*df_filename == '-' && strlen(df_filename) == 1) {
+	if (evaluate_inside_functionblock)
+	    int_error(1, "cannot use pseudofile '-' inside a function block");
 	plotted_data_from_stdin = TRUE;
 	volatile_data = TRUE;
 	data_fp = lf_top();
@@ -1405,19 +1457,36 @@ df_open(const char *cmd_filename, int max_using, struct curve_points *plot)
 
 	/* filename cannot be static array! */
 	gp_expand_tilde(&df_filename);
+
+	/* Open failure generates a warning rather than an immediate fatal error.
+	 * We assume success (GPVAL_ERRNO == 0) and let the caller change this to
+	 * something else if it considers DF_EOF a serious error.
+	 */
+	fill_gpval_integer("GPVAL_ERRNO", 0);
+
 #ifdef HAVE_SYS_STAT_H
 	{
 	    struct stat statbuf;
 	    if ((stat(df_filename, &statbuf) > -1) &&
 		S_ISDIR(statbuf.st_mode)) {
-		os_error(name_token, "\"%s\" is a directory",
-			df_filename);
+		char *errmsg = gp_alloc(32 + strlen(df_filename), "errmsg");
+		sprintf(errmsg, "\"%s\" is a directory", df_filename);
+		fill_gpval_string("GPVAL_ERRMSG", errmsg);
+		free(errmsg);
+		int_warn(name_token, "\"%s\" is a directory", df_filename);
+		df_eof = 1;
+		return DF_EOF;
 	    }
 	}
 #endif /* HAVE_SYS_STAT_H */
 
 	if ((data_fp = loadpath_fopen(df_filename, df_binary_file ? "rb" : "r")) == NULL) {
-	    int_warn(NO_CARET, "Cannot find or open file \"%s\"", df_filename);
+	    char *errmsg = gp_alloc(32 + strlen(df_filename), "errmsg");
+	    sprintf(errmsg, "Cannot find or open file \"%s\"", df_filename);
+	    fill_gpval_string("GPVAL_ERRMSG", errmsg);
+	    free(errmsg);
+	    if (plot)	/* suppress message if this is a stats command */
+		int_warn(NO_CARET, "Cannot find or open file \"%s\"", df_filename);
 	    df_eof = 1;
 	    return DF_EOF;
 	}
@@ -1672,13 +1741,17 @@ plot_option_using(int max_using)
 		if (no_cols < at_highest_column_used)
 		    no_cols = at_highest_column_used;
 
-		/* Try to detect dependence on a particular column so that
-		 * if it contains a "missing value" placeholder we can skip
-		 * evaluation altogether.
+		/* An imperfect test for dependence on particular columns
+		 * so that we do not try to evaluate this expression if a
+		 * column it refers to contains a "missing value" placeholder.
 		 */
 		for (i = 0; i < spec->at->a_count; i++) {
 		    if (spec->at->actions[i].index == DOLLARS)
 			spec->depends_on_column = (int)spec->at->actions[i].arg.v_arg.v.int_val;
+		    if ((spec->at->actions[i].index == COLUMN)
+		    &&  (spec->at->actions[i-1].index == PUSHC)
+		    &&  (spec->at->actions[i-1].arg.v_arg.type == INTGR))
+			spec->depends_on_column = (int)spec->at->actions[i-1].arg.v_arg.v.int_val;
 		}
 
 		/* Catch at least the simplest case of 'autotitle columnhead' using an expression */
@@ -1697,8 +1770,6 @@ plot_option_using(int max_using)
 		plot_ticlabel_using(CT_Y2TICLABEL);
 	    } else if (almost_equals(c_token, "ztic$labels")) {
 		plot_ticlabel_using(CT_ZTICLABEL);
-	    } else if (almost_equals(c_token, "cbtic$labels")) {
-		plot_ticlabel_using(CT_CBTICLABEL);
 	    } else if (almost_equals(c_token, "key")) {
 		plot_ticlabel_using(CT_KEYLABEL);
 
@@ -1738,7 +1809,6 @@ plot_option_using(int max_using)
     }
 
     /* Allow a format specifier after the enumeration of columns. */
-    /* Note: This was left out by mistake in versions 4.6.0 + 4.6.1 */
     if (!END_OF_COMMAND && isstring(c_token)) {
 	df_format = try_to_get_string();
 	if (!valid_format(df_format))
@@ -1810,14 +1880,15 @@ df_readascii(double v[], int max)
     char *s;
     int return_value = DF_GOOD;
 
-    /* Version 5.3
-     * Some plot styles (e.g. PARALLELPLOT) must guarantee that every line
+    /* Some plot styles (e.g. PARALLELPLOT) must guarantee that every line
      * of data will return some input value even if it is missing or bad.
      * This flag will force the line to return NaN rather than being skipped.
      * FIXME: it would be better to make this flag generic and set before entry.
      */
-    TBOOLEAN df_bad_is_NaN
-	= (df_current_plot && (df_current_plot->plot_style == PARALLELPLOT));
+    TBOOLEAN df_bad_returns_NaN
+	= (df_current_plot
+	    && (df_current_plot->plot_style == PARALLELPLOT
+		|| df_current_plot->plot_style == TABLESTYLE));
 
     assert(max <= MAXDATACOLS);
 
@@ -1825,9 +1896,7 @@ df_readascii(double v[], int max)
     if (df_eof)
 	return DF_EOF;
 
-#if (1)
-    /* DEBUG FIXME
-     * Normally 'plot ARRAY ...' wants each array entry as a separate input "line".
+    /* Normally 'plot ARRAY ...' wants each array entry as a separate input "line".
      * However spiderplots want only a single line, not one line per array entry.
      * This code forces the single line but loses the content.
      * Is there a better solution?
@@ -1836,7 +1905,6 @@ df_readascii(double v[], int max)
      */
     if (spiderplot && df_array && df_datum >= 0)
 	return DF_EOF;
-#endif
 
     /*{{{  process line */
     while ((s = df_gets()) != NULL) {
@@ -1905,6 +1973,13 @@ df_readascii(double v[], int max)
 		if (indexname && index_found) {
 		    df_eof = 1;
 		    return DF_EOF;
+		}
+
+		/* start of a new data block that might have column headers */
+		if (((&keyT)->auto_titles == COLUMNHEAD_KEYTITLES)
+		||  (df_columnheaders)) {
+		    parse_1st_row_as_headers = TRUE;
+		    df_already_got_headers = FALSE;
 		}
 
 		/* ignore line if current_index has just become
@@ -2026,9 +2101,9 @@ df_readascii(double v[], int max)
 	/* Always save the contents of the first row in case it is needed for
 	 * later access via column("header").  However, unless we know for certain that
 	 * it contains headers only, e.g. via parse_1st_row_as_headers or
-	 * (column_for_key_title > 0), also treat it as a data row.
+	 * (column_for_key_title > 0), keep going to also treat it as a data row.
 	 */
-	if (df_datum == 0 && !df_already_got_headers) {
+	if (df_datum == 0 && !df_already_got_headers && !df_array) {
 	    int j;
 	    FPRINTF((stderr, "datafile.c:%d processing %d column headers\n", __LINE__, df_no_cols));
 	    for (j=0; j<df_no_cols; j++) {
@@ -2047,6 +2122,7 @@ df_readascii(double v[], int max)
 		column_for_key_title = df_no_cols;
 
 	    if (column_for_key_title > 0) {
+		free(df_key_title);
 		df_key_title = gp_strdup(df_column[column_for_key_title-1].header);
 		if (!df_key_title) {
 		    FPRINTF((stderr,
@@ -2098,36 +2174,7 @@ df_readascii(double v[], int max)
 			if (df_current_plot->plot_style == BOXPLOT)
 				continue;
 		    }
-		    switch (use_spec[output].expected_type) {
-			default:
-			case CT_XTICLABEL:
-			    axis = FIRST_X_AXIS;
-			    axcol = 0;
-			    break;
-			case CT_X2TICLABEL:
-			    axis = SECOND_X_AXIS;
-			    axcol = 0;
-			    break;
-			case CT_YTICLABEL:
-			    axis = FIRST_Y_AXIS;
-			    axcol = 1;
-			    break;
-			case CT_Y2TICLABEL:
-			    axis = SECOND_Y_AXIS;
-			    axcol = 1;
-			    break;
-			case CT_ZTICLABEL:
-			    axis = FIRST_Z_AXIS;
-			    axcol = 2;
-			    break;
-			case CT_CBTICLABEL:
-			    axis = COLOR_AXIS;
-			    if (df_axis[2] == FIRST_Z_AXIS)
-				axcol = 2;
-			    else
-				axcol = df_no_use_specs - 1;
-			    break;
-		    }
+		    axcol = axcol_for_ticlabel( use_spec[output].expected_type, &axis );
 		    /* Trap special case of only a single 'using' column */
 		    if (output == 1)
 			xpos = (axcol == 0) ? df_datum : v[axcol-1];
@@ -2184,24 +2231,35 @@ df_readascii(double v[], int max)
 			}
 		    }
 
+		    df_missing_data_in_expression = FALSE;
 		    a.type = NOTDEFINED;
 		    evaluate_inside_using = TRUE;
 		    evaluate_at(use_spec[output].at, &a);
 		    evaluate_inside_using = FALSE;
-		    /* If column N contains the "missing" flag and is referenced by
-		     * 'using N' or 'using (func($N)) then we caught it already.
-		     * Here we check for indirect references like 'using "header_of_N"'.
+
+		    /* We tried to avoid evaluating this expression at all if its
+		     * dependence on a data column N was obvious (e.g. 'using ($N)')
+		     * and that column was seen to be missing from this input line.
+		     * Here we check whether actual evaluation tripped over missing
+		     * data values referenced indirectly (e.g. 'using (column($1))'.
 		     */
-		    if ((a.type == CMPLX) && isnan(a.v.cmplx_val.real)
-		    && (a.v.cmplx_val.imag == DF_MISSING)) {
-			return_value = DF_MISSING;
+		    if (df_missing_data_in_expression) {
+			FPRINTF((stderr,
+			    "df_readascii: hit missing data value during evaluation\n"));
 			v[output] = not_a_number();
+			return_value = DF_MISSING;
 			continue;
 		    }
 
 		    /* June 2018: CHANGE.  For consistency with function plots,	*/
 		    /* treat imaginary result as UNDEFINED.			*/
-		    if (undefined || (a.type == CMPLX && fabs(imag(&a)) > zero)) {
+		    if (a.type == CMPLX && (fabs(imag(&a)) > zero) && !isnan(real(&a))) {
+			return_value = DF_COMPLEX_VALUE;
+			v[output] = not_a_number();
+			continue;
+		    }
+
+		    if (undefined) {
 			return_value = DF_UNDEFINED;
 			v[output] = not_a_number();
 			continue;
@@ -2302,7 +2360,7 @@ df_readascii(double v[], int max)
 			/* line bad only if user explicitly asked for this column */
 			if (df_no_use_specs) {
 			    line_okay = FALSE;
-			    if (df_bad_is_NaN) {
+			    if (df_bad_returns_NaN) {
 				v[output] = not_a_number();
 				return DF_UNDEFINED;
 			    }
@@ -2326,28 +2384,47 @@ df_readascii(double v[], int max)
 			&& df_column[column - 1].good == DF_GOOD) {
 			v[output] = df_column[column - 1].datum;
 
-		    /* Version 5:
-		     * Do not return immediately on DF_MISSING or DF_UNDEFINED.
-		     * THIS IS A CHANGE.
-		     */
+		    /* Do not return immediately on DF_MISSING or DF_UNDEFINED */
+		    } else if (use_spec[output].expected_type == CT_MUST_HAVE) {
+			/* This catches cases where the plot style cannot tolerate
+			 * silently missed points (e.g. stacked histograms)
+			 */
+			v[output] = not_a_number();
+			return DF_UNDEFINED;
+
 		    } else if ((column <= df_no_cols)
 			     && (df_column[column - 1].good == DF_MISSING)) {
 			v[output] = not_a_number();
+			if (missing_val
+			&&  df_current_plot && df_current_plot->plot_style == TABLESTYLE) {
+			    df_strings[output].type = STRING;
+			    df_strings[output].v.string_val = gp_strdup(missing_val);
+			}
 			return_value = DF_MISSING;
 		    } else if ((column <= df_no_cols)
 			     && (df_column[column - 1].good == DF_UNDEFINED)) {
 			v[output] = df_column[column - 1].datum;
 			return_value = DF_UNDEFINED;
+		    } else if ((df_current_plot && df_current_plot->plot_style == POLYGONS
+				&& df_no_use_specs
+				&& column == df_no_cols+1)) {
+			/* The idea here is to forgive a missing color value in
+			 * polygon vertices after the first one. The test is not
+			 * quite correct since we don't track the vertex number.
+			 */
+			v[output] = not_a_number();
 		    } else {
 			/* line bad only if user explicitly asked for this column */
 			if (df_no_use_specs) {
-			    line_okay = FALSE;
-			    if (df_bad_is_NaN) {
+			    if (df_bad_returns_NaN) {
 				v[output] = not_a_number();
-				return DF_UNDEFINED;
+				return_value = DF_UNDEFINED;
+			    } else {
+				line_okay = FALSE;
+				break;      /* return or ignore depending on line_okay */
 			    }
-			}
-			break;      /* return or ignore depending on line_okay */
+			} else
+			    break;      /* return or ignore depending on line_okay */
 		    }
 		}
 		/* Special case to make 'using 0' et al. to work with labels */
@@ -2374,28 +2451,24 @@ df_readascii(double v[], int max)
 	 * all callers would have to be modified to deal with it one
 	 * way or the other. */
 	output -= df_no_tic_specs;
-	assert(df_no_use_specs == 0
-	       || output == df_no_use_specs
-	       || output == max);
 
 	/*
-	 * EAM Apr 2012 - If there is no using spec, then whatever we found on
-	 * the first line becomes the expectation for the rest of the input file.
-	 * THIS IS A CHANGE!
+	 * If there is no using spec then whatever we found on the first line
+	 * becomes the expectation for the rest of the input file.
 	 */
 	 if (df_no_use_specs == 0)
 		df_no_use_specs = output;
 
-	/* Version 5:
+	/*
 	 * If all requested values were OK, return number of columns read.
 	 * If a requested column was bad, return an error but nevertheless
 	 * return the other requested columns. The number of columns is
 	 * available to the caller in df_no_use_specs.
-	 * THIS IS A CHANGE!
 	 */
 	switch (return_value) {
 	case DF_MISSING:
 	case DF_UNDEFINED:
+	case DF_COMPLEX_VALUE:
 	case DF_BAD:
 			return return_value;
 			break;
@@ -2421,9 +2494,10 @@ df_readascii(double v[], int max)
 char *read_error_msg = "Data file read error";
 double df_matrix_corner[2][2]; /* First argument is corner, second argument is x (0) or y(1). */
 
-float
+static double
 df_read_a_float(FILE *fin) {
     float fdummy;
+    /* FIXME:  What if the file contains doubles rather than floats? */
     if (fread(&fdummy, sizeof(fdummy), 1, fin) != 1) {
 	if (feof(fin))
 	    int_error(NO_CARET, "Data file is empty");
@@ -2431,7 +2505,8 @@ df_read_a_float(FILE *fin) {
 	    int_error(NO_CARET, read_error_msg);
     }
     df_swap_bytes_by_endianess((char *)&fdummy, byte_read_order(df_bin_file_endianess), sizeof(fdummy));
-    return fdummy;
+
+    return (double)fdummy;
 }
 
 void
@@ -2508,7 +2583,7 @@ df_determine_matrix_info(FILE *fin)
     } else {
 
 	/* ASCII matrix format, converted to binary memory format. */
-	static float *matrix = NULL;
+	static double *matrix = NULL;
 	int nr, nc;
 
 	/* Insurance against creating a matrix with df_read_matrix()
@@ -2516,11 +2591,19 @@ df_determine_matrix_info(FILE *fin)
 	 */
 	if (matrix)
 	    free(matrix);
+	matrix = NULL;
 
 	/* Set important binary variables, then free memory for all default
 	 * binary records and set number of records to 0. */
 	initialize_binary_vars();
 	clear_binary_records(DF_CURRENT_RECORDS);
+
+	/* The default binary record type is currently float (Dec 2019)
+	 * but we have changed df_read_matrix to return doubles.
+	 * Make sure the binary record type is marked accordingly.
+	 */
+	df_extend_binary_columns(1);
+	df_set_read_type(1, DF_DOUBLE);
 
 	/* If the user has set an explicit locale for numeric input, apply it */
 	/* here so that it affects data fields read from the input file.      */
@@ -2663,16 +2746,16 @@ f_column(union argument *arg)
 	push(Ginteger(&a, line_count));
     else if (column == 0)       /* $0 = df_datum */
 	push(Gcomplex(&a, (double) df_datum, 0.0));
-    else if (column == DOLLAR_NCOLUMNS)	/* $# returns actual number of columns in this line */
+    else if (column == DOLLAR_NCOLUMNS)	{
+	/* $# returns actual number of columns in this line */
 	push(Gcomplex(&a, (double)df_no_cols, 0.0));
-    else if (column < 1 || column > df_no_cols) {
+    } else if (column < 1 || column > df_no_cols) {
 	undefined = TRUE;
-	/* Nov 2014: This is needed in case the value is referenced */
-	/* in an expression inside a 'using' clause.		    */
 	push(Gcomplex(&a, not_a_number(), 0.0));
     } else if (df_column[column-1].good == DF_MISSING) {
 	/* Doesn't set undefined to TRUE although perhaps it should */
 	push(Gcomplex(&a, not_a_number(), (double)DF_MISSING));
+	df_missing_data_in_expression = TRUE;
     } else if (df_column[column-1].good != DF_GOOD) {
 	undefined = TRUE;
 	push(Gcomplex(&a, not_a_number(), 0.0));
@@ -2792,7 +2875,7 @@ f_columnhead(union argument *arg)
 	}
 	parse_1st_row_as_headers = TRUE;
     } else {
-/* DEBUG */ int_error(NO_CARET,"Internal error: df_column[] not initialized\n");
+	int_error(NO_CARET,"Internal error: df_column[] not initialized\n");
     }
 }
 
@@ -2816,8 +2899,8 @@ f_valid(union argument *arg)
 /*}}} */
 
 /*{{{  void f_timecolumn() */
-/* Version 5 - replace the old and very broken timecolumn(N) with
- * a 2-parameter version that requires an explicit time format
+/*
+ * 2-parameter version that requires an explicit time format
  * timecolumn(N, "format").
  */
 void
@@ -2840,8 +2923,7 @@ f_timecolumn(union argument *arg)
 	column = (int) magnitude(pop(&a));
 	break;
     case 1:
-	/* No format parameter passed (v4-style call) */
-	/* Only needed for backward compatibility */
+	/* Only needed for backward compatibility with version 4 */
 	column = magnitude(&b);
 	b.v.string_val = gp_strdup(timefmt);
 	b.type = STRING;
@@ -2961,7 +3043,7 @@ valid_format(const char *format)
  * number.
  */
 int
-expect_string(const char column)
+expect_string(const signed char column)
 {
     /* Used only by TABLESTYLE */
     if (column <= 0) {
@@ -2981,6 +3063,17 @@ expect_string(const char column)
     && (use_spec[column-1].at->actions[1].index == COLUMN))
 	use_spec[column-1].at->actions[1].index = STRINGCOLUMN;
     return(use_spec[column-1].column);
+}
+
+/*
+ * Plotting routines can call this prior to invoking df_readline() to indicate
+ * that they cannot tolerate failing to return some value for this column,
+ * even if the input field is junk.
+ */
+void
+require_value(const char column)
+{
+    use_spec[column-1].expected_type = CT_MUST_HAVE;
 }
 
 /*
@@ -3075,10 +3168,13 @@ df_parse_string_field(char *field)
     int length;
 
     if (!field) {
-	return NULL;
+	/* treat missing string as empty string */
+	return strdup("");
     } else if (*field == '"') {
 	field++;
 	length = strcspn(field, "\"");
+    } else if (df_array) {
+	length = strcspn(field," ");
     } else if (df_separators != NULL) {
 	length = strcspn(field, df_separators);
 	if (length > strcspn(field, "\""))	/* Why? */
@@ -3383,7 +3479,6 @@ df_insert_scanned_use_spec(int uspec)
 
 /* Not the most elegant way of defining the default columns, but I prefer
  * this to switch and conditional statements when there are so many styles.
- * EAM: The default columns are irrelevant if there is a using spec in the plot command.
  */
 typedef struct df_bin_default_columns {
     PLOT_STYLE plot_style;
@@ -3415,12 +3510,14 @@ df_bin_default_columns default_style_cols[] = {
     {XYERRORLINES, 3, 1},
     {FILLEDCURVES, 1, 1},
     {PM3DSURFACE, 1, 2},
+    {CONTOURFILL, 1, 2},
     {LABELPOINTS, 1, 1},
     {HISTOGRAMS, 1, 0},
     {IMAGE, 1, 2},
     {RGBIMAGE, 3, 2},
     {RGBA_IMAGE, 4, 2},
     {CIRCLES, 2, 1},
+    {SECTORS, 4, 2},
     {ELLIPSES, 2, 3},
     {TABLESTYLE, 0, 0}
 };
@@ -3437,7 +3534,7 @@ df_bin_default_columns default_style_cols[] = {
 static void
 adjust_binary_use_spec(struct curve_points *plot)
 {
-    char *nothing_known = "No default columns known for that plot style";
+    char *nothing_known = "a 'using' specifier is required for that binary plot style";
     unsigned int ps_index;
     enum PLOT_STYLE plot_style = plot ? plot->plot_style : LINES;
 
@@ -3452,6 +3549,9 @@ adjust_binary_use_spec(struct curve_points *plot)
 	if (default_style_cols[ps_index].plot_style == plot_style)
 	    break;
     }
+    /* A known default is all very well, but if there was an actual using spec
+     * that's all we need.
+     */
     if (ps_index == sizeof(default_style_cols)/sizeof(default_style_cols[0])
     &&  !df_no_use_specs)
 	int_error(NO_CARET, nothing_known);
@@ -3969,8 +4069,9 @@ plot_option_binary(TBOOLEAN set_matrix, TBOOLEAN set_default)
 	    c_token++;
 
 	    if (set_default) {
+		char *tmp = try_to_get_string();
 		free(df_binary_format);
-		df_binary_format = try_to_get_string();
+		df_binary_format = tmp;
 	    } else {
 		char *format_string = try_to_get_string();
 		if (!format_string)
@@ -4066,7 +4167,10 @@ clear_binary_records(df_records_type records_type)
 
 
 /*
- * Syntax is:   array=(xdim,ydim):(xdim,ydim):CONST:(xdim) etc
+ * Syntax:
+ *	plot FOO binary array=(xdim,ydim)[:(xdim,ydim)[...]]
+ * or
+ *	plot FOO binary record=(xdim,ydim)[:(xdim,ydim)[...]]
  */
 static void
 plot_option_array(void)
@@ -4084,7 +4188,7 @@ plot_option_array(void)
 	    if (++number_of_records > df_num_bin_records)
 		df_add_binary_records(1, DF_CURRENT_RECORDS);
 	    df_bin_record[df_num_bin_records - 1].cart_dim[0] = int_expression();
-	    /* Handle the old syntax:  array=123x456 */
+	    /* Handle the old syntax:  array=123x456 (still used by Octave) */
 	    if (!END_OF_COMMAND) {
 		char xguy[8]; int itmp=0;
 		copy_str(xguy, c_token, 6);
@@ -4113,6 +4217,58 @@ plot_option_array(void)
     } while (equals(c_token, ":"));
 }
 
+/*
+ * Syntax:
+ *	plot FOO sparse matrix=(<ncols>,<nrows>) dx=<val> dy=<val> origin=(x0,y0)
+ * The size is required. Origin defaults to (0,0), dx default to 1,
+ * dy defaults to dx.
+ * This provides an alternative input format for matrix data
+ * that is neither "uniform matrix" nor "nonuniform matrix".
+ * The full matrix grid is defined in advance here, to be followed
+ * by input of individual entries one per line: x y value
+ */
+void
+plot_option_sparse()
+{
+    double dx = 1, dy = 0;
+    double image_xy[2];
+    const char *sparse_error_msg =
+	    "syntax:  sparse matrix=(<cols>,<rows>) [dx=<dx> dy=<dy> origin=(<x0>,<y0>)]";
+
+    if (!equals(c_token++, "matrix") || !equals(c_token++, "=") || !token2tuple(image_xy,2))
+	int_error(c_token, sparse_error_msg);
+    df_xpixels = image_xy[0];
+    df_ypixels = image_xy[1];
+
+    while (!END_OF_COMMAND) {
+	if (equals(c_token, "dx")) {
+	    c_token++;
+	    if (!equals(c_token++,"="))
+		int_error(c_token, sparse_error_msg);
+	    dx = real_expression();
+	} else if (equals(c_token, "dy")) {
+	    c_token++;
+	    if (!equals(c_token++,"="))
+		int_error(c_token, sparse_error_msg);
+	    dy = real_expression();
+	} else if (almost_equals(c_token, "ori$gin")) {
+	    c_token++;
+	    df_image_origin[0] = df_image_origin[1] = 0.0;
+	    if (!equals(c_token++, "=") || !token2tuple(df_image_origin,2))
+		int_error(c_token, sparse_error_msg);
+	} else
+	    break;
+    }
+
+    if (dx == 0)
+	int_error(c_token, sparse_error_msg);
+    if (dy == 0)
+	dy = dx;
+
+    /* Save for populate_sparse_matrix */
+    df_image_deltas[0] = dx;
+    df_image_deltas[1] = dy;
+}
 
 /* Evaluate a tuple of up to specified dimension. */
 #define TUPLE_SEPARATOR_CHAR ":"
@@ -4404,33 +4560,6 @@ df_set_read_type(int col, df_data_type type)
     df_column_bininfo[col-1].column.read_size
 	= df_binary_details[type].type.read_size;
 }
-
-
-/* Get the column data type. */
-df_data_type
-df_get_read_type(int col)
-{
-    assert(col > 0);
-    /* Check if we have room at least col columns */
-    if (col < df_max_bininfo_cols)
-	return(df_column_bininfo[col].column.read_type);
-    else
-	return -1;
-}
-
-
-/* Get the binary column data size. */
-int
-df_get_read_size(int col)
-{
-    assert(col > 0);
-    /* Check if we have room at least col columns */
-    if (col < df_max_bininfo_cols)
-	return(df_column_bininfo[col].column.read_size);
-    else
-	return -1;
-}
-
 
 /* If the column number is greater than number of binary columns, set
  * the uninitialized columns binary info to that of the last specified
@@ -4813,7 +4942,7 @@ df_readbinary(double v[], int max)
 
     /* For matrix data structure (i.e., gnuplot binary). */
     static double first_matrix_column;
-    static float *scanned_matrix_row = 0;
+    static double *scanned_matrix_row = 0;
     static int first_matrix_row_col_count;
     TBOOLEAN saved_first_matrix_column = FALSE;
 
@@ -5178,7 +5307,7 @@ df_readbinary(double v[], int max)
 		    && first_matrix_row_col_count < scan_size[0]) {
 		    if (!first_matrix_row_col_count)
 			scanned_matrix_row = gp_realloc(scanned_matrix_row,
-					 scan_size[0]*sizeof(float), "gpbinary matrix row");
+					 scan_size[0]*sizeof(double), "gpbinary matrix row");
 		    scanned_matrix_row[first_matrix_row_col_count] = df_column[i].datum;
 		    first_matrix_row_col_count++;
 		    if (first_matrix_row_col_count == scan_size[0]) {
@@ -5198,7 +5327,16 @@ df_readbinary(double v[], int max)
 	    {
 		int j;
 
-		df_datum = df_column[i].datum;
+		/* df_datum will be returned as column(0)
+		 * Aug 2022: CHANGE
+		 * I do not know why the original code set this to df_column[i].datum.
+		 * Returning the linear order in the matrix is more useful for both
+		 * ascii and binary nonuniform matrices.
+		 */
+		if (df_nonuniform_matrix)
+		    df_datum++;
+		else
+		    df_datum = df_column[i].datum;
 
 		/* Fill backward so that current read value is not
 		 * overwritten. */
@@ -5314,9 +5452,8 @@ df_readbinary(double v[], int max)
 			    df_tokens[output] = df_stringexpression[output] = s;
 			}
 			/* Expecting a numerical type but got a string value */
-			/* 'with points pt variable' is the only current user */
 			else if (df_current_plot
-			     &&  (df_current_plot->lp_properties.p_type == PT_VARIABLE)) {
+			     && (df_current_plot->lp_properties.p_type == PT_VARIABLE)) {
 			    static char varchar[8];
 			    safe_strncpy(varchar, a.v.string_val, 8);
 			    df_tokens[output] = varchar;
@@ -5367,12 +5504,11 @@ df_readbinary(double v[], int max)
 			   && df_column[column - 1].good == DF_GOOD)
 		    v[output] = df_column[column - 1].datum;
 
-		/* EAM - Oct 2002 Distinguish between DF_MISSING
-		 * and DF_BAD.  Previous versions would never
-		 * notify caller of either case.  Now missing data
-		 * will be noted. Bad data should arguably be
-		 * noted also, but that would change existing
-		 * default behavior.  */
+		/* Distinguish between DF_MISSING and DF_BAD.
+		 * Missing data will be flagged.
+		 * Bad data should arguably be flagged also, but that would
+		 * change existing default behavior.
+		 */
 		else if ((column <= df_no_cols)
 			 && (df_column[column - 1].good == DF_MISSING))
 		    return DF_MISSING;
@@ -5430,51 +5566,15 @@ df_readbinary(double v[], int max)
 		evaluate_inside_using = TRUE;
 		evaluate_at(use_spec[i].at, &a);
 		evaluate_inside_using = FALSE;
-		switch (use_spec[i].expected_type) {
-		    default:
-		    case CT_XTICLABEL:
-			axis = FIRST_X_AXIS;
-			axcol = 0;
-			break;
-		    case CT_X2TICLABEL:
-			axis = SECOND_X_AXIS;
-			axcol = 0;
-			break;
-		    case CT_YTICLABEL:
-			axis = FIRST_Y_AXIS;
-			axcol = 1;
-			break;
-		    case CT_Y2TICLABEL:
-			axis = SECOND_Y_AXIS;
-			axcol = 1;
-			break;
-		    case CT_ZTICLABEL:
-			axis = FIRST_Z_AXIS;
-			axcol = 2;
-			break;
-		    case CT_CBTICLABEL:
-			axis = COLOR_AXIS;
-			if (df_axis[2] == FIRST_Z_AXIS)
-			    axcol = 2;
-			else
-			    axcol = df_no_use_specs - 1;
-			break;
-		}
 		if (a.type == STRING) {
+		    axcol = axcol_for_ticlabel( use_spec[i].expected_type, &axis );
 		    add_tic_user(&axis_array[axis], a.v.string_val, v[axcol], -1);
 		    gpfree_string(&a);
 		}
 	    }
 	}
 
-	/* output == df_no_use_specs if using was specified -
-	 * actually, smaller of df_no_use_specs and max */
-	assert(df_no_use_specs == 0
-	       || output == df_no_use_specs
-	       || output == max);
-
 	return output;
-
     }
     /*}}} */
 
@@ -5736,4 +5836,88 @@ df_generate_ascii_array_entry()
     }
 
     return df_line;
+}
+
+/* utility routine shared by df_readascii and df_readbinary */
+static int
+axcol_for_ticlabel(enum COLUMN_TYPE type, int *axis)
+{
+    int axcol;
+
+	switch (type) {
+	    default:
+	    case CT_XTICLABEL:
+		*axis = FIRST_X_AXIS;
+		axcol = 0;
+		break;
+	    case CT_X2TICLABEL:
+		*axis = SECOND_X_AXIS;
+		axcol = 0;
+		break;
+	    case CT_YTICLABEL:
+		*axis = FIRST_Y_AXIS;
+		axcol = 1;
+		break;
+	    case CT_Y2TICLABEL:
+		*axis = SECOND_Y_AXIS;
+		axcol = 1;
+		break;
+	    case CT_ZTICLABEL:
+		*axis = FIRST_Z_AXIS;
+		axcol = 2;
+		break;
+	}
+
+    return axcol;
+}
+
+/* Expand sparse matrix to fill entire grid defined by
+ *   plot FOO sparse matrix=(cols,rows) origin=(x0,y0) dx=dx dy=dy
+ * Note: the extra level of indirection for points and p_count
+ *       is so that this can be called from either plot or splot.
+ */
+void
+populate_sparse_matrix(struct coordinate **points, int *p_count)
+{
+    const struct coordinate empty = {0, 0, 0, NAN, NAN, NAN, NAN, UNDEFINED};
+    struct coordinate *matrix;
+    int i,j,m;
+    int msize = df_ypixels * df_xpixels;
+    int noutside = 0;
+
+    /* Create a new an empty matrix, fill in coordinates, initialize to UNDEFINED */
+    matrix = gp_alloc(msize*sizeof(struct coordinate), "sparse matrix");
+    m = 0;
+    for (j=0; j<df_ypixels; j++)
+    for (i=0; i<df_xpixels; i++)
+    {
+	matrix[m] = empty;
+	matrix[m].x = df_image_origin[0] + i*df_image_deltas[0];
+	matrix[m].y = df_image_origin[1] + j*df_image_deltas[1];
+	m++;
+    }
+
+    /* Now copy each input point into the nearest grid entry
+     * (coordinates may not match exactly).
+     */
+    for (m = 0; m < *p_count; m++) {
+	struct coordinate *p = & ((*points)[m]);
+	i = round((p->x - df_image_origin[0]) / df_image_deltas[0]);
+	j = round((p->y - df_image_origin[1]) / df_image_deltas[1]);
+	if (i >= df_xpixels || j >= df_ypixels || i < 0 || j < 0)
+	    noutside++;
+	else
+	    matrix[ j*df_xpixels + i ] = *p;
+    }
+
+    fprintf(stderr, "Loaded %d points into %d x %d sparse matrix\n",
+	    *p_count-noutside, df_xpixels, df_ypixels);
+    if (noutside > 0)
+	fprintf(stderr, "       %d points outside defined matrix extent\n", noutside);
+
+    /* Replace the original data with the full sparse matrix */
+    free(*points);
+    *points = matrix;
+    *p_count = msize;
+
 }

@@ -30,4 +30,3 @@ plot '++' using 1:2:(sqrt($1+$2)):($1 + $2*3):(2):(f($1,$2)) with arrows as vari
 
 pause -1 "Hit <cr> to continue"
 
-reset

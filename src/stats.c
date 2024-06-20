@@ -36,9 +36,10 @@
 #include "command.h"
 #include "datafile.h"
 #include "gadgets.h"  /* For polar and parametric flags */
+#include "gplocale.h" /* For locale handling */
 #include "matrix.h"   /* For vector allocation */
 #include "scanner.h"  /* To check for legal prefixes */
-#include "variable.h" /* For locale handling */
+#include "voxelgrid.h"
 
 #include "stats.h"
 
@@ -721,7 +722,7 @@ file_variables( struct file_stats s, char *prefix )
 	t_value headers;
 	t_value *A = gp_alloc((s.columns+1) * sizeof(t_value), "column_headers");
 
-	A[0].v.int_val = s.columns;
+	Ginteger(&A[0], s.columns);
 	for (i = 1; i <= s.columns; i++)
 	    Gstring(&A[i], gp_strdup(df_retrieve_columnhead(i)));
 	headers.type = ARRAY;
@@ -840,11 +841,11 @@ statsrequest(void)
     struct two_column_stats res_xy = {0};
 
     /* Vars for variable handling */
-    static char *prefix = NULL;       /* prefix for user-defined vars names */
+    static char *prefix = NULL;	/* prefix for user-defined vars names */
     TBOOLEAN prefix_from_columnhead = FALSE;
 
     /* Vars that control output */
-    TBOOLEAN do_output = TRUE;     /* Generate formatted output */
+    TBOOLEAN do_output = TRUE;	/* Generate formatted output */
     TBOOLEAN array_data = FALSE;
 
     c_token++;
@@ -858,7 +859,7 @@ statsrequest(void)
     /* Initialize */
     invalid = 0;          /* number of missing/invalid records */
     blanks = 0;           /* number of blank lines */
-    header_records = 0;    /* number of records treated as headers rather than data */
+    header_records = 0;   /* number of records treated as headers rather than data */
     doubleblanks = 0;     /* number of repeated blank lines */
     out_of_range = 0;     /* number pts rejected, because out of range */
     n = 0;                /* number of records retained */
@@ -866,7 +867,7 @@ statsrequest(void)
 
     free(data_x);
     free(data_y);
-    data_x = vec(max_n);       /* start with max. value */
+    data_x = vec(max_n);  /* start with max. value */
     data_y = vec(max_n);
     free(prefix);
     prefix = NULL;
@@ -895,10 +896,17 @@ statsrequest(void)
 	df_set_plot_mode(MODE_PLOT);		/* Used for matrix datafiles */
 	columns = df_open(file_name, 2, NULL);	/* up to 2 using specs allowed */
 
+	/* "stats <badfilename> nooutput"
+	 * allows user to test for existance of a file without generating a fatal error.
+	 * The 'nooutput' keyword suppresses the resulting error message as well.
+	 */
 	if (columns < 0) {
-	    int_warn(NO_CARET, "Can't read data file");
+	    fill_gpval_integer("GPVAL_ERRNO", 1);
 	    while (!END_OF_COMMAND)
-		c_token++;
+		if (almost_equals(c_token++, "noout$put"))
+		    do_output = FALSE;
+	    if (do_output)
+		fprintf(stderr, "Cannot find or open file \"%s\"\n", file_name);
 	    goto stats_cleanup;
 	}
 
@@ -947,6 +955,26 @@ statsrequest(void)
 	/* they cannot be mistaken as resulting from the current analysis. */
 	clear_stats_variables(prefix ? prefix : "STATS");
 
+	/* Special case for voxel grid stats: "stats $vgrid {name <prefix>} */
+	if (df_voxelgrid) {
+	    vgrid *vgrid = get_vgrid_by_name(file_name)->udv_value.v.vgrid;
+	    int N, nonzero;
+
+	    vgrid_stats(vgrid);
+	    N = vgrid->size;
+	    nonzero = N*N*N - vgrid->nzero;
+
+	    if (!prefix)
+		prefix = gp_strdup("STATS");
+	    create_and_set_var( vgrid->mean_value, prefix, "_mean",   "" );
+	    create_and_set_var( vgrid->stddev, prefix, "_stddev", "" );
+	    create_and_set_var( vgrid->sum, prefix, "_sum", "" );
+	    create_and_set_var( vgrid->min_value, prefix, "_min", "" );
+	    create_and_set_var( vgrid->max_value, prefix, "_max", "" );
+	    create_and_set_var( nonzero, prefix, "_nonzero", "" );
+	    goto stats_cleanup;
+	}
+
 	/* If the user has set an explicit locale for numeric input, apply it */
 	/* here so that it affects data fields read from the input file. */
 	set_numeric_locale();
@@ -973,7 +1001,7 @@ statsrequest(void)
 		}
 	    } /* if (need to extend storage space) */
 
-	    /* FIXME: ascii "matrix" input from df_readline via df_readbinary does not
+	    /* ascii "matrix" input from df_readline via df_readbinary does not
 	     * flag NaN values so we must check each returned value here
 	     */
 	    if (df_matrix && (i == 2) && isnan(v[1]))
@@ -1043,7 +1071,7 @@ statsrequest(void)
 
     /* No data! Try to explain why. */
     if ( n == 0 ) {
-	if ( out_of_range > 0 )
+	if (out_of_range > 0)
 	    int_warn( NO_CARET, "All points out of range" );
 	else
 	    int_warn( NO_CARET, "No valid data points found in file" );

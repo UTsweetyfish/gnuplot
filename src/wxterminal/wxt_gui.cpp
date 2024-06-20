@@ -120,6 +120,9 @@
 #include <wx/printdlg.h>
 
 extern "C" {
+#if (wxMAJOR_VERSION >= 3)
+#include "xdg.h"
+#endif
 #ifdef HAVE_CONFIG_H
 # include "config.h"
 #endif
@@ -168,7 +171,6 @@ int    wxt_hypertext_fontweight = 10;
 
 #if defined(WXT_MONOTHREADED) && !defined(_WIN32)
 static int wxt_yield = 0;		/* used in wxt_waitforinput() */
-static TBOOLEAN wxt_interlock = FALSE;	/* used to prevent recursive OnCreateWindow */
 #endif
 
 char *wxt_enhanced_fontname = NULL;
@@ -328,13 +330,28 @@ bool wxtApp::OnInit()
 	/* application and vendor name are used by wxConfig to construct the name
 	 * of the config file/registry key and must be set before the first call
 	 * to Get() */
-	SetVendorName(wxT("gnuplot"));
-	SetAppName(wxT("gnuplot-wxt"));
-	wxConfigBase *pConfig = wxConfigBase::Get();
+	const wxString vendorName(wxT("gnuplot"));
+	const wxString appName(wxT("gnuplot-wxt"));
+	SetVendorName(vendorName);
+	SetAppName(appName);
+
+#ifdef USE_XDG_BASEDIR
+	if (!wxFileConfig::GetLocalFile(appName).Exists()) {
+		// Traditional config file (~/.gnuplot-wxt) does not exist.
+		// We will use $XDG_CONFIG_HOME/gnuplot/gnuplot-wxt.conf only if
+		// $XDG_CONFIG_HOME/gnuplot/ exists or can be created.
+		char *configFile = xdg_get_path(kXDGConfigHome, "gnuplot-wxt.conf",
+									TRUE /* subdir */, TRUE /* create */);
+		if (configFile) {
+			wxConfig::Set(new wxFileConfig(appName, vendorName, configFile));
+			free(configFile);
+		}
+	}
+#endif
 	/* this will force writing back of the defaults for all values
 	 * if they're not present in the config - this can give the user an idea
 	 * of all possible settings */
-	pConfig->SetRecordDefaults();
+	wxConfig::Get()->SetRecordDefaults();
 
 	FPRINTF((stderr, "OnInit finished\n"));
 
@@ -393,9 +410,6 @@ void wxtApp::OnCreateWindow( wxCommandEvent& event )
 	wxt_window_t *window = (wxt_window_t*) event.GetClientData();
 
 	FPRINTF((stderr,"wxtApp::OnCreateWindow\n"));
-#if defined(WXT_MONOTHREADED) && !defined(_WIN32)
-	wxt_interlock = TRUE;
-#endif
 	window->frame = new wxtFrame( window->title, window->id );
 	window->frame->Show(true);
 #ifdef __WXMSW__
@@ -417,9 +431,6 @@ void wxtApp::OnCreateWindow( wxCommandEvent& event )
 	/* tell the other thread we have finished */
 	wxMutexLocker lock(*(window->mutex));
 	window->condition->Broadcast();
-#if defined(WXT_MONOTHREADED) && !defined(_WIN32)
-	wxt_interlock = FALSE;
-#endif
 }
 
 /* wrapper for AddPendingEvent or ProcessEvent */
@@ -594,6 +605,10 @@ void wxtFrame::OnExport( wxCommandEvent& WXUNUSED( event ) )
 		cairo_scale(panel->plot.cr,
 			1./(double)panel->plot.oversampling_scale,
 			1./(double)panel->plot.oversampling_scale);
+
+		/* FIXME: how were previous settings clobbered? */
+		gp_cairo_set_lineprops(&(panel->plot));
+
 		panel->wxt_cairo_refresh();
 
 		cairo_show_page(panel->plot.cr);
@@ -621,6 +636,10 @@ void wxtFrame::OnExport( wxCommandEvent& WXUNUSED( event ) )
 		cairo_scale(panel->plot.cr,
 			1./(double)panel->plot.oversampling_scale,
 			1./(double)panel->plot.oversampling_scale);
+
+		/* FIXME: how were previous settings clobbered? */
+		gp_cairo_set_lineprops(&(panel->plot));
+
 		panel->wxt_cairo_refresh();
 
 		cairo_show_page(panel->plot.cr);
@@ -1538,11 +1557,12 @@ static void wxt_initialize_hidden(int i)
 static void wxt_update_key_box( unsigned int x, unsigned int y )
 {
 	if (wxt_max_key_boxes <= wxt_cur_plotno) {
+		int first_new_keybox = wxt_max_key_boxes;
 		wxt_max_key_boxes = wxt_cur_plotno + 10;
 		wxt_key_boxes = (wxtBoundingBox *)realloc(wxt_key_boxes,
 				wxt_max_key_boxes * sizeof(wxtBoundingBox));
-		wxt_initialize_key_boxes(wxt_cur_plotno);
-		wxt_initialize_hidden(wxt_cur_plotno);
+		wxt_initialize_key_boxes(first_new_keybox);
+		wxt_initialize_hidden(first_new_keybox);
 	}
 	wxtBoundingBox *bb = &(wxt_key_boxes[wxt_cur_plotno]);
 	y = term->ymax - y;
@@ -2000,10 +2020,6 @@ void wxt_init()
 	if ( wxt_current_window == NULL ) {
 
 		FPRINTF((stderr,"opening a new plot window\n"));
-#if defined(WXT_MONOTHREADED) && !defined(_WIN32)
-		if (wxt_interlock)
-		    return;
-#endif
 		/* create a new plot window and show it */
 		wxt_window_t window;
 		window.id = wxt_window_number;
@@ -2366,7 +2382,7 @@ void wxt_put_text(unsigned int x, unsigned int y, const char * string)
 		wxt_command_push(temp_command);
 
 		/* set up the global variables needed by enhanced_recursion() */
-		enhanced_fontscale = wxt_set_fontscale;
+		enhanced_fontscale = 1.0;
 		strncpy(enhanced_escape_format, "%c", sizeof(enhanced_escape_format));
 
 		/* Set the recursion going. We say to keep going until a
@@ -2378,7 +2394,7 @@ void wxt_put_text(unsigned int x, unsigned int y, const char * string)
 
 		while (*(string = enhanced_recursion((char*)string, TRUE,
 				wxt_enhanced_fontname,
-				wxt_current_plot->fontsize * wxt_set_fontscale,
+				wxt_current_plot->fontsize,
 				0.0, TRUE, TRUE, 0))) {
 			wxt_enhanced_flush();
 
@@ -2398,8 +2414,9 @@ void wxt_put_text(unsigned int x, unsigned int y, const char * string)
 		return;
 	}
 
-	temp_command.command = command_put_text;
+	/* We reach here only if this is *not* enhanced text */
 
+	temp_command.command = command_put_text;
 	temp_command.x1 = x;
 	temp_command.y1 = term->ymax - y;
 	/* Note : we must take '\0' (EndOfLine) into account */
@@ -2407,6 +2424,7 @@ void wxt_put_text(unsigned int x, unsigned int y, const char * string)
 	strcpy(temp_command.string, string);
 
 	wxt_command_push(temp_command);
+	return;
 }
 
 void wxt_linetype(int lt)
@@ -2460,7 +2478,7 @@ int wxt_set_font (const char *font)
 
 	char *fontname = NULL;
 	gp_command temp_command;
-	int fontsize = 0;
+	double fontsize = 0;
 
 	temp_command.command = command_set_font;
 
@@ -2468,7 +2486,7 @@ int wxt_set_font (const char *font)
 		int sep = strcspn(font,",");
 		fontname = strdup(font);
 		if (font[sep] == ',') {
-			sscanf(&(font[sep+1]), "%d", &fontsize);
+			sscanf(&(font[sep+1]), "%lf", &fontsize);
 			fontname[sep] = '\0';
 		}
 	} else {
@@ -2495,22 +2513,20 @@ int wxt_set_font (const char *font)
 			fontsize = wxt_set_fontsize;
 	}
 
-	/* Reset the term variables (hchar, vchar, h_tic, v_tic).
-	 * They may be taken into account in next plot commands */
+	/* Reset the term variables (hchar, vchar, h_tic, v_tic)
+	 * so that the core code can use them in subsequent plot commands.
+	 */
 	gp_cairo_set_font(wxt_current_plot, fontname, fontsize * wxt_set_fontscale);
-	gp_cairo_set_termvar(wxt_current_plot, &(term->v_char),
-	                                       &(term->h_char));
-	gp_cairo_set_font(wxt_current_plot, fontname, fontsize);
+	gp_cairo_set_termvar(wxt_current_plot, &(term->v_char), &(term->h_char));
 
 	wxt_MutexGuiLeave();
 	wxt_sigint_check();
 	wxt_sigint_restore();
 
-	/* Note : we must take '\0' (EndOfLine) into account */
+	/* Push the equivalent command onto the wxt display list */
 	temp_command.string = new char[strlen(fontname)+1];
 	strcpy(temp_command.string, fontname);
-	temp_command.integer_value = fontsize * wxt_set_fontscale;
-
+	temp_command.double_value = fontsize * wxt_set_fontscale;
 	wxt_command_push(temp_command);
 
 	/* Enhanced text processing needs to know the new font also */
@@ -2589,7 +2605,7 @@ void wxt_linewidth(double lw)
 	wxt_command_push(temp_command);
 }
 
-int wxt_text_angle(int angle)
+int wxt_text_angle(float angle)
 {
 	if (wxt_status != STATUS_OK)
 		return 1;
@@ -2665,6 +2681,8 @@ void wxt_filled_polygon(int n, gpiPoint *corners)
 
 	temp_command.command = command_filled_polygon;
 	temp_command.integer_value = n;
+	temp_command.x1 = corners[0].x;
+	temp_command.y1 = term->ymax - corners[0].y;
 	temp_command.corners = new gpiPoint[n];
 	/* can't use memcpy() here, as we have to mirror the y axis */
 	gpiPoint *corners_copy = temp_command.corners;
@@ -3174,7 +3192,7 @@ void wxtPanel::wxt_cairo_exec_command(gp_command command)
 		gp_cairo_enhanced_writec(&plot, command.integer_value);
 		return;
 	case command_set_font :
-		gp_cairo_set_font(&plot, command.string, command.integer_value);
+		gp_cairo_set_font(&plot, command.string, command.double_value);
 		return;
 	case command_linewidth :
 		gp_cairo_set_linewidth(&plot, command.double_value);;

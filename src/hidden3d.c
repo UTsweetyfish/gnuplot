@@ -1041,7 +1041,8 @@ build_networks(struct surface_points *plots, int pcount)
 	 * plot styles are mapped to others, that are genuinely
 	 * available in 3d. */
 	switch (this_plot->plot_style) {
-	case PM3DSURFACE:
+	case PM3DSURFACE:	
+	case CONTOURFILL:
 	case LINESPOINTS:
 	case STEPS:
 	case FSTEPS:
@@ -1146,7 +1147,8 @@ build_networks(struct surface_points *plots, int pcount)
 	/* edges can be used to calculate occlusion of lines, including */
 	/* the plot borders. (NB: the PM3D surface will _not_ be hidden */
 	/* by other non-PM3D surfaces.					*/
-	if (this_plot->plot_style == PM3DSURFACE)
+	if (this_plot->plot_style == PM3DSURFACE
+	||  this_plot->plot_style == CONTOURFILL)
 	    above = below = LT_NODRAW;
 
 	/* calculate the point symbol type: */
@@ -1164,6 +1166,15 @@ build_networks(struct surface_points *plots, int pcount)
 	    /* NB: It would not work to apply arrowhead properties now */
 	    /* because hidden3d code mixes arrows from multiple plots. */
 	}
+
+	/* If the platform we are built for does not provide a stable qsort
+	 * then we need a secondary sort key for ./configure --enable-stable-sort
+	 * Since we will only use it for plot style LINES and that style does not
+	 * look at the p_number property, we can store a key there for later
+	 * access by compare_edges_by_zmin() when the vertices are sorted.
+	 */
+	if (this_plot->plot_style == LINES || this_plot->plot_style == POINTSTYLE)
+	    this_plot->lp_properties.p_number = surface;
 
 	/* HBB 20000715: Code block for non-grid structured datasets.
 	 * EAM Jun 2020: Individual line plots can opt out of grid processing
@@ -1223,6 +1234,7 @@ build_networks(struct surface_points *plots, int pcount)
 
 		    switch (this_plot->plot_style) {
 		    case PM3DSURFACE:
+		    case CONTOURFILL:
 		    case LINESPOINTS:
 		    case STEPS:
 		    case FSTEPS:
@@ -1316,6 +1328,7 @@ build_networks(struct surface_points *plots, int pcount)
 
 		switch (this_plot->plot_style) {
 		case PM3DSURFACE:
+		case CONTOURFILL:
 		case LINESPOINTS:
 		case STEPS:
 		case FSTEPS:
@@ -1494,8 +1507,21 @@ build_networks(struct surface_points *plots, int pcount)
 static int
 compare_edges_by_zmin(SORTFUNC_ARGS p1, SORTFUNC_ARGS p2)
 {
-    return SIGN(vlist[elist[*(const long *) p1].v2].z
+    int ordering = SIGN(vlist[elist[*(const long *) p1].v2].z
 		- vlist[elist[*(const long *) p2].v2].z);
+#if defined(WITH_2ND_SORTKEY)
+    if (ordering == 0) {
+	struct lp_style_type *lp1 = vlist[elist[*(const long *) p1].v2].lp_style;
+	struct lp_style_type *lp2 = vlist[elist[*(const long *) p2].v2].lp_style;
+	if (lp1 && lp2) {
+	    if (lp1->p_number > lp2->p_number)
+		ordering = 1;
+	    else if (lp1->p_number < lp2->p_number)
+		ordering = -1;
+	}
+    }
+#endif
+    return ordering;
 }
 
 static void
@@ -1512,7 +1538,7 @@ sort_edges_by_z()
     for (i = 0; i < edges.end; i++)
 	sortarray[i] = i;
     /* sort it */
-    qsort(sortarray, (size_t) edges.end, sizeof(long), compare_edges_by_zmin);
+    gp_qsort(sortarray, (size_t) edges.end, sizeof(long), compare_edges_by_zmin);
 
     /* traverse plist in the order given by sortarray, and set the
      * 'next' pointers */
@@ -1552,7 +1578,7 @@ sort_polys_by_z()
 	sortarray[i] = i;
 
     /* sort it */
-    qsort(sortarray, (size_t) polygons.end, sizeof(long),
+    gp_qsort(sortarray, (size_t) polygons.end, sizeof(long),
 	  compare_polys_by_zmax);
 
     /* traverse plist in the order given by sortarray, and set the

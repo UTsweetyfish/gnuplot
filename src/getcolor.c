@@ -79,12 +79,10 @@ palettes_differ(t_sm_palette *p1, t_sm_palette *p2)
 	if (strcmp(p1->Cfunc.definition, p2->Cfunc.definition))
 	    return 1;
 	break;
-    case SMPAL_COLOR_MODE_GRADIENT: {
-	int i=0;
-
+    case SMPAL_COLOR_MODE_GRADIENT:
 	if (p1->gradient_num != p2->gradient_num)
 	    return 1;
-	for (i=0; i<p1->gradient_num; ++i) {
+	for (int i=0; i<p1->gradient_num; ++i) {
 	    if (p1->gradient[i].pos != p2->gradient[i].pos)
 		return 1;
 	    if (p1->gradient[i].col.r != p2->gradient[i].col.r)
@@ -96,9 +94,9 @@ palettes_differ(t_sm_palette *p1, t_sm_palette *p2)
 	}
 	break;
     case SMPAL_COLOR_MODE_CUBEHELIX:
+    case SMPAL_COLOR_MODE_VIRIDIS:
 	return 1;
 	break;
-    } /* case GRADIENT */
     } /* switch() */
 
     return 0;  /* no real difference found */
@@ -240,6 +238,7 @@ color_components_from_gray(double gray, rgb_color *color)
 	color->b = GetColorValueFromFormula(sm_palette.formulaB, gray);
 	break;
     case SMPAL_COLOR_MODE_GRADIENT:
+    case SMPAL_COLOR_MODE_VIRIDIS:
 	interpolate_color_from_gray(gray, color);
 	break;
 #ifndef GPLT_X11_MODE
@@ -330,13 +329,18 @@ rgb1maxcolors_from_gray(double gray, rgb_color *color)
 double
 quantize_gray( double gray )
 {
-    double qgray = floor(gray * sm_palette.use_maxcolors)
-		 / (sm_palette.use_maxcolors-1);
+    double qgray = gray;
 
-    if (sm_palette.colorMode == SMPAL_COLOR_MODE_GRADIENT) {
-	int j;
+    if (sm_palette.gradient_type == SMPAL_GRADIENT_TYPE_DISCRETE)
+      return qgray;
+
+    qgray = floor(gray * sm_palette.use_maxcolors)
+		        / (sm_palette.use_maxcolors-1);
+
+    if (sm_palette.gradient_type == SMPAL_GRADIENT_TYPE_MIXED) {
 	gradient_struct *g = sm_palette.gradient;
 	double small_interval = 1. / sm_palette.use_maxcolors;
+	int j;
 
 	/* Backward compatibility with common case of 1 segment */
 	if ((sm_palette.gradient_num <= 2) && (qgray == 0))
@@ -366,6 +370,9 @@ quantize_gray( double gray )
 
 	}
     }
+
+    if (qgray >= 1.0)
+        qgray = 1.0;
 
     return qgray;
 }
@@ -791,6 +798,10 @@ HSV_2_RGB(rgb_color *col)
 	return;
     }
 
+    /* Apply HSV offset */
+    h += sm_palette.HSV_offset;
+    if (h > 1.0) h -= 1.0;
+
     h *= 6.;  /* h range in gnuplot is [0,1] and not the usual [0,360] */
     i = floor(h);
     f = h - i;
@@ -843,6 +854,39 @@ hsv2rgb ( rgb_color *color )
     return    ((unsigned int)(255.*color->r) << 16)
 	    + ((unsigned int)(255.*color->g) << 8)
 	    + ((unsigned int)(255.*color->b));
+}
+
+/*
+ * Get the index of the gradient segment corresponding to the gray value 
+ * from the discrete gradient palette.
+ */
+int
+index_from_gray (double gray)
+{
+    int idx, maxidx;
+
+    if (gray <= 0)
+	return 0;
+
+    maxidx = sm_palette.gradient_num;
+    if (gray >= 1) 
+	return maxidx - 1;
+
+    /* find index by bisecting */
+    idx = 0;
+    if (maxidx > 1) {
+        int topidx = maxidx - 1;
+        /* treat idx as though it is bottom index */
+        while (idx != topidx) {
+            int tmpidx = (idx + topidx) / 2;
+            if (sm_palette.gradient[tmpidx].pos < gray)
+                idx = tmpidx + 1;  /* round up */
+            else
+                topidx = tmpidx;
+        }
+    }
+
+    return idx-1;
 }
 
 /* eof getcolor.c */

@@ -2,32 +2,33 @@ Description: removes picins latex include
 Author: Anton Gladky <gladk@debian.org>
 Last-Update: 2015-06-16
 
-Index: gnuplot-5.4.4/docs/Makefile.am
+Index: gnuplot-6.0.0/docs/Makefile.am
 ===================================================================
---- gnuplot-5.4.4.orig/docs/Makefile.am
-+++ gnuplot-5.4.4/docs/Makefile.am
-@@ -191,7 +191,6 @@ gnuplot.pdf: figures.tex pdf_figures $(s
- 	  touch figures.idx ; \
- 	  rm -f pdffigures.tex ; \
- 	  ( echo "\usepackage{graphicx}" > pdffigures.tex ; \
--	    echo "\usepackage{picins}" >> pdffigures.tex ; \
- 	  ) ; \
- 	  TEXINPUTS=.:$(srcdir):$(top_srcdir):${TEXINPUTS}: $(PDFLATEX) $< ; \
- 	  TEXINPUTS=.:$(srcdir):$(top_srcdir):${TEXINPUTS}: $(PDFLATEX) $< ; \
-Index: gnuplot-5.4.4/docs/doc2tex.c
+--- gnuplot-6.0.0.orig/docs/Makefile.am
++++ gnuplot-6.0.0/docs/Makefile.am
+@@ -143,7 +143,6 @@ pdf_figures: $(GNUPLOT_EXE) $(srcdir)/pl
+ 	$(AM_V_at)GNUPLOT_LIB=$(top_srcdir)/demo $(GNUPLOT_EXE) $(srcdir)/plotstyles.gnu
+ 	rm -f gpinsetfigure.tex
+ 	printf '%s\n' '\usepackage{graphicx}' \
+-		'\usepackage{picins}' \
+ 		'\newcommand{\gpinsetfigure}[1]{' \
+ 		'  \parpic[r][rt]{\includegraphics[width=3in,keepaspectratio]{#1}}' \
+ 		'}' > gpinsetfigure.tex
+Index: gnuplot-6.0.0/docs/doc2tex.c
 ===================================================================
---- gnuplot-5.4.4.orig/docs/doc2tex.c
-+++ gnuplot-5.4.4/docs/doc2tex.c
-@@ -166,12 +166,6 @@ process_line( char *line, FILE *b)
+--- gnuplot-6.0.0.orig/docs/doc2tex.c
++++ gnuplot-6.0.0/docs/doc2tex.c
+@@ -181,12 +181,7 @@ process_line( char *line, FILE *b)
  	    break;
  
      case 'F':			/* embedded figure */
 -	    if (figures) {
 -		line[strlen(line)-1]=NUL;
--		(void) fputs("\\parpic[r][rt]{\\includegraphics[width=3in,keepaspectratio]{",b);
+-		(void) fputs("\\gpinsetfigure{",b);
 -		fputs(line+1, b);
--		(void) fputs("}}\n",b);
+-		(void) fputs("}\n",b);
 -	    }
++
  	    break;
  
-     case '@':{			/* start/end table */
+     case 'D':			/* link to demo figure */

@@ -105,29 +105,12 @@ long atol();
 double strtod();
 #else /* HAVE_STDLIB_H */
 # include <stdlib.h>
-# ifndef VMS
-#  ifndef EXIT_FAILURE
+# ifndef EXIT_FAILURE
 #   define EXIT_FAILURE (1)
-#  endif
-#  ifndef EXIT_SUCCESS
+# endif
+# ifndef EXIT_SUCCESS
 #   define EXIT_SUCCESS (0)
-#  endif
-# else /* VMS */
-#  ifdef VAXC            /* replacement values suppress some messages */
-#   ifdef  EXIT_FAILURE
-#    undef EXIT_FAILURE
-#   endif
-#   ifdef  EXIT_SUCCESS
-#    undef EXIT_SUCCESS
-#   endif
-#  endif /* VAXC */
-#  ifndef  EXIT_FAILURE
-#   define EXIT_FAILURE  0x10000002
-#  endif
-#  ifndef  EXIT_SUCCESS
-#   define EXIT_SUCCESS  1
-#  endif
-# endif /* VMS */
+# endif
 #endif /* HAVE_STDLIB_H */
 
 /* Deal with varargs functions */
@@ -167,8 +150,13 @@ extern char *sys_errlist[];
 # include <sys/types.h>
 #endif
 
+#ifdef VMS
+# include "vms.h"
+#endif
+
 #ifdef HAVE_SYS_STAT_H
 # include <sys/stat.h>
+
 
 /* This is all taken from GNU fileutils lib/filemode.h */
 
@@ -261,11 +249,6 @@ extern char *sys_errlist[];
 # include <sys/time.h> /* for gettimeofday() */
 #endif
 
-#if defined(PIPES) && defined(VMS)
-FILE *popen(char *, char *);
-int pclose(FILE *);
-#endif
-
 #ifdef HAVE_FLOAT_H
 # include <float.h>
 #endif
@@ -348,6 +331,10 @@ char * gp_getcwd(char *path, size_t len);
 # endif
 #endif
 
+#if defined(OS2) && !defined(__KLIBC__)
+void usleep(unsigned long microseconds);
+#endif
+
 /* sleep delay time, where delay is a double value */
 #if defined(HAVE_USLEEP) && !defined(_WIN32)
 #  define GP_SLEEP(delay) usleep((unsigned int) ((delay)*1e6))
@@ -376,7 +363,13 @@ void gp_atexit(void (*function)(void));
 /* Gnuplot replacement for exit(3). Calls the functions registered using
  * gp_atexit(). Always use this function instead of exit(3)!
  */
-void gp_exit(int status);
+#if defined(__GNUC__)
+    void gp_exit(int status) __attribute__((noreturn));
+#elif defined(_MSC_VER)
+    __declspec(noreturn) void gp_exit(int status);
+#else
+    void gp_exit(int status);
+#endif
 
 /* Calls the cleanup functions registered using gp_atexit().
  * Normally gnuplot should be exited using gp_exit(). In some cases, this is not
@@ -536,13 +529,13 @@ void gp_rewinddir(GPDIR *);
    p += strlen(path); \
    if (p!=path) p--; \
    if (*p && (*p != DIRSEP1) && (*p != DIRSEP2)) { \
-     if (*p) p++; *p++ = DIRSEP1; *p = NUL; \
+     if (*p) {p++;} *p++ = DIRSEP1; *p = NUL; \
    } \
    strcat (path, file); \
  }
 #else
 #define PATH_CONCAT(path,file) strcat(path,file)
-#endif
+#endif /* VMS */
 
 #ifndef inrange
 # define inrange(z,min,max) \

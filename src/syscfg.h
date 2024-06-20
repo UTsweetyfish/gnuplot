@@ -78,6 +78,8 @@
 # ifdef NO_GIH
    /* for show version long */
 #  define HELPFILE "GNUPLOT$HELP"
+# else
+#  define HELPFILE "sys$login:gnuplot.gih"
 # endif
 # if !defined(VAXCRTL) && !defined(DECCRTL)
 #  define VAXCRTL VAXCRTL_AND_DECCRTL_UNDEFINED
@@ -165,11 +167,7 @@ FILE * win_popen(const char *filename, const char *mode);
 #endif
 
 #ifndef HELPFILE
-#ifndef VMS
 # define HELPFILE "docs/gnuplot.gih"
-#else
-# define HELPFILE "sys$login:gnuplot.gih"
-#endif
 #endif
 
 #ifndef HOME
@@ -249,6 +247,10 @@ FILE * win_popen(const char *filename, const char *mode);
 # endif
 #endif
 
+/* ISO C allows for NULL to be implementation defined */
+/* POSIX says put the definition in stddef.h */
+#include <stddef.h>
+
 /* LFS support */
 #if !defined(HAVE_FSEEKO) || !defined(HAVE_OFF_T)
 # if defined(_MSC_VER)
@@ -265,6 +267,7 @@ FILE * win_popen(const char *filename, const char *mode);
  */
 
 #ifdef HAVE_INTTYPES_H
+#define GNUPLOT_INT64_SUPPORT
 				/* NB: inttypes.h includes stdint.h */
 #include <inttypes.h>		/* C99 type definitions */
 typedef int64_t intgr_t;	/* Allows evaluation with 64-bit integer arithmetic */
@@ -273,6 +276,7 @@ typedef uint64_t uintgr_t;	/* Allows evaluation with 64-bit integer arithmetic *
 #define INTGR_MAX INT64_MAX
 #define INTGR_MIN INT64_MIN
 #define LARGEST_GUARANTEED_NONOVERFLOW 9.22337203685477478e+18
+#define LARGEST_EXACT_INT 9007199254740992.	/* IEEE 754 double 53-bit mantissa  2^53 */
 #else
 typedef int intgr_t;		/* no C99 types available */
 typedef unsigned uintgr_t;	/* no C99 types available */
@@ -280,8 +284,17 @@ typedef unsigned uintgr_t;	/* no C99 types available */
 #define INTGR_MAX INT_MAX
 #define INTGR_MIN INT_MIN
 #define LARGEST_GUARANTEED_NONOVERFLOW (double)(INT_MAX)
+#define LARGEST_EXACT_INT 9007199254740992.	/* IEEE 754 double 53-bit mantissa  2^53*/
 #endif
 
+/*
+ * Support for complex-valued functions
+ */
+#if defined(HAVE_COMPLEX_H)
+#if defined(HAVE_CSQRT) && defined(HAVE_CABS) && defined(HAVE_CLOG) && defined(HAVE_CEXP)
+#define HAVE_COMPLEX_FUNCS 1
+#endif
+#endif
 
 typedef double coordval;
 
@@ -295,7 +308,6 @@ typedef double coordval;
 #ifdef VMS
 # define DEFAULT_COMMENTS_CHARS "#!"
 # define is_system(c) ((c) == '$')
-/* maybe configure could check this? */
 # define BACKUP_FILESYSTEM 1
 #else /* not VMS */
 # define DEFAULT_COMMENTS_CHARS "#"
@@ -395,6 +407,29 @@ typedef unsigned char _Bool;
 # ifndef USE_READLINE
 #  define USE_READLINE
 # endif
+#endif
+
+/* The qsort implementation in glibc is stable;
+ * i.e. elements that test as equal are guaranteed to retain their origin order.
+ * However the qsort provided by BSD and macOS is not stable.
+ * Those systems may provide mergesort as a stable alternative.
+ * Other non-glibc platforms including mingw and Cygwin do not provide a stable sort.
+ * We will try to pick an appropriate sort if possible and otherwise add code
+ * so that pm3d depthsorting is stable.
+ * If ./configure --with-stable-sort
+ *	1) Use mergesort if the system provides it, otherwise qsort
+ *	2) If neither mergesort nor glibc's qsort is available
+ *	   add a sequence field to pm3d quadrangles that serves as a secondary sort key
+ */
+#if defined(HAVE_MERGESORT)
+#  define gp_qsort(base, n, size, compare) mergesort(base, n, size, compare)
+#else
+#  define gp_qsort(base, n, size, compare) qsort(base, n, size, compare)
+#  endif
+#if defined(WITH_STABLE_SORT)
+#  if !defined(__GLIBC__) && !defined(HAVE_MERGESORT)
+#    define WITH_2ND_SORTKEY
+#  endif
 #endif
 
 #endif /* !SYSCFG_H */
